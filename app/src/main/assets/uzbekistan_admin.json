@@ -1,0 +1,236 @@
+{
+  "regions": [
+    {
+      "name": "Andijon viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Andijon tumani", "schools": [] },
+        { "type": "shahar", "name": "Andijon shahri", "schools": [] },
+        { "type": "tuman", "name": "Asaka tumani", "schools": [] },
+        { "type": "shahar", "name": "Asaka shahri", "schools": [] },
+        { "type": "tuman", "name": "Baliqchi tumani", "schools": [] },
+        { "type": "tuman", "name": "Bo‘ston tumani", "schools": [] },
+        { "type": "shahar", "name": "Bo‘ston shahri", "schools": [] },
+        { "type": "tuman", "name": "Buloqboshi tumani", "schools": [] },
+        { "type": "tuman", "name": "Izboskan tumani", "schools": [] },
+        { "type": "tuman", "name": "Jalaquduq tumani", "schools": [] },
+        { "type": "tuman", "name": "Marhamat tumani", "schools": [] },
+        { "type": "tuman", "name": "Oltinko‘l tumani", "schools": [] },
+        { "type": "tuman", "name": "Paxtaobod tumani", "schools": [] },
+        { "type": "tuman", "name": "Shahrixon tumani", "schools": [] },
+        { "type": "tuman", "name": "Ulug‘nor tumani", "schools": [] },
+        { "type": "tuman", "name": "Xo‘jaobod tumani", "schools": [] },
+        { "type": "tuman", "name": "Qo‘rg‘ontepa tumani", "schools": [] },
+        { "type": "tuman", "name": "Xonobod tumani", "schools": [] },
+        { "type": "shahar", "name": "Xonobod shahri", "schools": [] }
+      ]
+    },
+    {
+      "name": "Buxoro viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Buxoro tumani", "schools": [] },
+        { "type": "shahar", "name": "Buxoro shahri", "schools": [] },
+        { "type": "tuman", "name": "G‘ijduvon tumani", "schools": [] },
+        { "type": "tuman", "name": "Jondor tumani", "schools": [] },
+        { "type": "tuman", "name": "Kogon tumani", "schools": [] },
+        { "type": "shahar", "name": "Kogon shahri", "schools": [] },
+        { "type": "tuman", "name": "Olot tumani", "schools": [] },
+        { "type": "tuman", "name": "Peshku tumani", "schools": [] },
+        { "type": "tuman", "name": "Qorako‘l tumani", "schools": [] },
+        { "type": "tuman", "name": "Qorovulbozor tumani", "schools": [] },
+        { "type": "tuman", "name": "Romitan tumani", "schools": [] },
+        { "type": "tuman", "name": "Shofirkon tumani", "schools": [] },
+        { "type": "tuman", "name": "Vobkent tumani", "schools": [] }
+      ]
+    },
+    {
+      "name": "Farg‘ona viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Farg‘ona tumani", "schools": [] },
+        { "type": "shahar", "name": "Farg‘ona shahri", "schools": [] },
+        { "type": "shahar", "name": "Marg‘ilon shahri", "schools": [] },
+        { "type": "shahar", "name": "Qo‘qon shahri", "schools": [] },
+        { "type": "tuman", "name": "Beshariq tumani", "schools": [] },
+        { "type": "tuman", "name": "Bog‘dod tumani", "schools": [] },
+        { "type": "tuman", "name": "Buvayda tumani", "schools": [] },
+        { "type": "tuman", "name": "Dang‘ara tumani", "schools": [] },
+        { "type": "tuman", "name": "Furqat tumani", "schools": [] },
+        { "type": "tuman", "name": "Oltiariq tumani", "schools": [] },
+        { "type": "tuman", "name": "O‘zbekiston tumani", "schools": [] },
+        { "type": "tuman", "name": "Quva tumani", "schools": [] },
+        { "type": "shahar", "name": "Quva shahri", "schools": [] },
+        { "type": "tuman", "name": "Rishton tumani", "schools": [] },
+        { "type": "tuman", "name": "So‘x tumani", "schools": [] },
+        { "type": "tuman", "name": "Toshloq tumani", "schools": [] },
+        { "type": "tuman", "name": "Uchko‘prik tumani", "schools": [] },
+        { "type": "tuman", "name": "Yozyovon tumani", "schools": [] }
+      ]
+    },
+    {
+      "name": "Jizzax viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Jizzax tumani", "schools": [] },
+        { "type": "shahar", "name": "Jizzax shahri", "schools": [] },
+        { "type": "tuman", "name": "Arnasoy tumani", "schools": [] },
+        { "type": "tuman", "name": "Baxmal tumani", "schools": [] },
+        { "type": "tuman", "name": "Do‘stlik tumani", "schools": [] },
+        { "type": "tuman", "name": "Forish tumani", "schools": [] },
+        { "type": "tuman", "name": "G‘allaorol tumani", "schools": [] },
+        { "type": "tuman", "name": "Mirzacho‘l tumani", "schools": [] },
+        { "type": "tuman", "name": "Paxtakor tumani", "schools": [] },
+        { "type": "tuman", "name": "Yangiobod tumani", "schools": [] },
+        { "type": "tuman", "name": "Zafarobod tumani", "schools": [] },
+        { "type": "tuman", "name": "Zarbdor tumani", "schools": [] },
+        { "type": "tuman", "name": "Zomin tumani", "schools": [] },
+        { "type": "tuman", "name": "Sharof Rashidov tumani", "schools": [] }
+      ]
+    },
+    {
+      "name": "Namangan viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Namangan tumani", "schools": [] },
+        { "type": "shahar", "name": "Namangan shahri", "schools": [] },
+        { "type": "tuman", "name": "Chortoq tumani", "schools": [] },
+        { "type": "tuman", "name": "Chust tumani", "schools": [] },
+        { "type": "tuman", "name": "Kosonsoy tumani", "schools": [] },
+        { "type": "tuman", "name": "Mingbuloq tumani", "schools": [] },
+        { "type": "tuman", "name": "Norin tumani", "schools": [] },
+        { "type": "tuman", "name": "Pop tumani", "schools": [] },
+        { "type": "tuman", "name": "To‘raqo‘rg‘on tumani", "schools": [] },
+        { "type": "tuman", "name": "Uchqo‘rg‘on tumani", "schools": [] },
+        { "type": "tuman", "name": "Uychi tumani", "schools": [] },
+        { "type": "tuman", "name": "Yangiqo‘rg‘on tumani", "schools": [] }
+      ]
+    },
+    {
+      "name": "Navoiy viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Navoiy tumani", "schools": [] },
+        { "type": "shahar", "name": "Navoiy shahri", "schools": [] },
+        { "type": "tuman", "name": "Karmana tumani", "schools": [] },
+        { "type": "tuman", "name": "Konimex tumani", "schools": [] },
+        { "type": "tuman", "name": "Navbahor tumani", "schools": [] },
+        { "type": "tuman", "name": "Nurota tumani", "schools": [] },
+        { "type": "tuman", "name": "Qiziltepa tumani", "schools": [] },
+        { "type": "tuman", "name": "Tomdi tumani", "schools": [] },
+        { "type": "tuman", "name": "Uchquduq tumani", "schools": [] }
+      ]
+    },
+    {
+      "name": "Qashqadaryo viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Qarshi tumani", "schools": [] },
+        { "type": "shahar", "name": "Qarshi shahri", "schools": [] },
+        { "type": "tuman", "name": "Chiroqchi tumani", "schools": [] },
+        { "type": "tuman", "name": "Dehqonobod tumani", "schools": [] },
+        { "type": "tuman", "name": "G‘uzor tumani", "schools": [] },
+        { "type": "tuman", "name": "Kasbi tumani", "schools": [] },
+        { "type": "tuman", "name": "Kitob tumani", "schools": [] },
+        { "type": "tuman", "name": "Koson tumani", "schools": [] },
+        { "type": "tuman", "name": "Mirishkor tumani", "schools": [] },
+        { "type": "tuman", "name": "Muborak tumani", "schools": [] },
+        { "type": "tuman", "name": "Nishon tumani", "schools": [] },
+        { "type": "tuman", "name": "Qamashi tumani", "schools": [] },
+        { "type": "tuman", "name": "Yakkabog‘ tumani", "schools": [] },
+        { "type": "tuman", "name": "Shahrisabz tumani", "schools": [] },
+        { "type": "shahar", "name": "Shahrisabz shahri", "schools": [] }
+      ]
+    },
+    {
+      "name": "Samarqand viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Samarqand tumani", "schools": [] },
+        { "type": "shahar", "name": "Samarqand shahri", "schools": [] },
+        { "type": "tuman", "name": "Bulung‘ur tumani", "schools": [] },
+        { "type": "tuman", "name": "Ishtixon tumani", "schools": [] },
+        { "type": "tuman", "name": "Jomboy tumani", "schools": [] },
+        { "type": "tuman", "name": "Kattaqo‘rg‘on tumani", "schools": [] },
+        { "type": "shahar", "name": "Kattaqo‘rg‘on shahri", "schools": [] },
+        { "type": "tuman", "name": "Narpay tumani", "schools": [] },
+        { "type": "tuman", "name": "Nurobod tumani", "schools": [] },
+        { "type": "tuman", "name": "Oqdaryo tumani", "schools": [] },
+        { "type": "tuman", "name": "Paxtachi tumani", "schools": [] },
+        { "type": "tuman", "name": "Payariq tumani", "schools": [] },
+        { "type": "tuman", "name": "Pastdarg‘om tumani", "schools": [] },
+        { "type": "tuman", "name": "Qo‘shrabot tumani", "schools": [] },
+        { "type": "tuman", "name": "Toyloq tumani", "schools": [] },
+        { "type": "tuman", "name": "Urgut tumani", "schools": [] }
+      ]
+    },
+    {
+      "name": "Sirdaryo viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Guliston tumani", "schools": [] },
+        { "type": "shahar", "name": "Guliston shahri", "schools": [] },
+        { "type": "tuman", "name": "Boyovut tumani", "schools": [] },
+        { "type": "tuman", "name": "Mirzaobod tumani", "schools": [] },
+        { "type": "tuman", "name": "Oqoltin tumani", "schools": [] },
+        { "type": "tuman", "name": "Sardoba tumani", "schools": [] },
+        { "type": "tuman", "name": "Sayxunobod tumani", "schools": [] },
+        { "type": "tuman", "name": "Sirdaryo tumani", "schools": [] },
+        { "type": "tuman", "name": "Xovos tumani", "schools": [] }
+      ]
+    },
+    {
+      "name": "Surxondaryo viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Termiz tumani", "schools": [] },
+        { "type": "shahar", "name": "Termiz shahri", "schools": [] },
+        { "type": "tuman", "name": "Angor tumani", "schools": [] },
+        { "type": "tuman", "name": "Bandixon tumani", "schools": [] },
+        { "type": "tuman", "name": "Boysun tumani", "schools": [] },
+        { "type": "tuman", "name": "Denov tumani", "schools": [] },
+        { "type": "tuman", "name": "Jarqo‘rg‘on tumani", "schools": [] },
+        { "type": "tuman", "name": "Muzrabot tumani", "schools": [] },
+        { "type": "tuman", "name": "Oltinsoy tumani", "schools": [] },
+        { "type": "tuman", "name": "Qiziriq tumani", "schools": [] },
+        { "type": "tuman", "name": "Qumqo‘rg‘on tumani", "schools": [] },
+        { "type": "tuman", "name": "Sariosiyo tumani", "schools": [] },
+        { "type": "tuman", "name": "Sherobod tumani", "schools": [] },
+        { "type": "tuman", "name": "Sho‘rchi tumani", "schools": [] },
+        { "type": "tuman", "name": "Uzun tumani", "schools": [] }
+      ]
+    },
+    {
+      "name": "Toshkent viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Bekobod tumani", "schools": [] },
+        { "type": "shahar", "name": "Bekobod shahri", "schools": [] },
+        { "type": "tuman", "name": "Bo‘ka tumani", "schools": [] },
+        { "type": "tuman", "name": "Bo‘stonliq tumani", "schools": [] },
+        { "type": "tuman", "name": "Chinoz tumani", "schools": [] },
+        { "type": "tuman", "name": "Qibray tumani", "schools": [] },
+        { "type": "tuman", "name": "Ohangaron tumani", "schools": [] },
+        { "type": "shahar", "name": "Ohangaron shahri", "schools": [] },
+        { "type": "tuman", "name": "Parkent tumani", "schools": [] },
+        { "type": "tuman", "name": "Piskent tumani", "schools": [] },
+        { "type": "tuman", "name": "Quyi Chirchiq tumani", "schools": [] },
+        { "type": "tuman", "name": "Yuqori Chirchiq tumani", "schools": [] },
+        { "type": "tuman", "name": "Zangiota tumani", "schools": [] },
+        { "type": "tuman", "name": "Oqqo‘rg‘on tumani", "schools": [] },
+        { "type": "tuman", "name": "Toshkent tumani", "schools": [] },
+        { "type": "tuman", "name": "Yangiyo‘l tumani", "schools": [] },
+        { "type": "shahar", "name": "Yangiyo‘l shahri", "schools": [] },
+        { "type": "shahar", "name": "Chirchiq shahri", "schools": [] },
+        { "type": "shahar", "name": "Angren shahri", "schools": [] },
+        { "type": "shahar", "name": "Olmaliq shahri", "schools": [] }
+      ]
+    },
+    {
+      "name": "Xorazm viloyati",
+      "districts": [
+        { "type": "tuman", "name": "Urganch tumani", "schools": ["33-umumta'lim o‘rta maktab"] },
+        { "type": "shahar", "name": "Urganch shahri", "schools": [] },
+        { "type": "tuman", "name": "Bog‘ot tumani", "schools": [] },
+        { "type": "tuman", "name": "Gurlan tumani", "schools": [] },
+        { "type": "tuman", "name": "Xonqa tumani", "schools": [] },
+        { "type": "tuman", "name": "Hazorasp tumani", "schools": [] },
+        { "type": "tuman", "name": "Xiva tumani", "schools": [] },
+        { "type": "shahar", "name": "Xiva shahri", "schools": [] },
+        { "type": "tuman", "name": "Qo‘shko‘pir tumani", "schools": [] },
+        { "type": "tuman", "name": "Shovot tumani", "schools": [] },
+        { "type": "tuman", "name": "Yangibozor tumani", "schools": [] },
+        { "type": "tuman", "name": "Tuproqqal’a tumani", "schools": [] }
+      ]
+    }
+  ]
+}
