@@ -1,0 +1,53 @@
+{
+  "name": "stugram-backend",
+  "version": "2.0.0",
+  "description": "Production-ready backend for a social media mobile app",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "nodemon --legacy-watch --watch server.js --watch src --watch tests --ignore node_modules --ignore ../node_modules --ignore ../demo server.js",
+    "start": "node server.js",
+    "worker:recommendations": "node src/workers/runRecommendationRefreshWorker.js",
+    "maintenance:cleanup": "node src/scripts/runMaintenanceCleanup.js",
+    "diagnose:atlas": "node src/scripts/diagnoseAtlas.js",
+    "lint": "eslint .",
+    "check": "node -e \"console.log('Backend structure ready')\"",
+    "test": "NODE_ENV=test jest --runInBand --detectOpenHandles",
+    "test:watch": "NODE_ENV=test jest --watch",
+    "test:ci": "NODE_ENV=test jest --runInBand --coverage"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.58.5",
+    "cloudinary": "^2.5.1",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "firebase-admin": "^13.1.0",
+    "google-auth-library": "^9.15.1",
+    "helmet": "^8.0.0",
+    "ioredis": "^5.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.8.1",
+    "morgan": "^1.10.0",
+    "multer": "^2.0.2",
+    "socket.io": "^4.8.1",
+    "streamifier": "^0.1.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "eslint": "^9.13.0",
+    "jest": "^30.0.5",
+    "mongodb-memory-server": "^10.1.4",
+    "nodemon": "^3.1.7",
+    "socket.io-client": "^4.8.1",
+    "supertest": "^7.1.1"
+  },
+  "overrides": {
+    "path-to-regexp": "0.1.13",
+    "picomatch": "^2.3.2",
+    "brace-expansion": "^1.1.13"
+  }
+}

@@ -1,0 +1,12 @@
+[WARN] Firebase Admin not configured; push delivery disabled 
+[INFO] MongoDB connected 
+[WARN] Failed to ensure users.identity index {"message":"Index exists but options differ","existingName":"identity_1","existingUnique":true,"existingSparse":false,"expectedUnique":true,"expectedSparse":true}
+[WARN] Slow Mongo query detected {"model":"User","operation":"findOne","durationMs":1553.31,"filter":{"identity":"shrfyusupova@gmail.com"}}
+[WARN] Slow Mongo query detected {"model":"Settings","operation":"findOne","durationMs":508.31,"filter":{"user":"69d9b4db98f5fe1f53d38f30"}}
+[WARN] Slow Mongo query detected {"model":"User","operation":"findOne","durationMs":390.53,"filter":{"_id":"69d9b4db98f5fe1f53d38f30"}}
+[INFO] Bootstrap login user ensured {"identity":"sh***@gmail.com","userId":"69d9b4db98f5fe1f53d38f30"}
+[INFO] Socket.IO initialized 
+[INFO] Maintenance cleanup scheduler started {"intervalMinutes":60}
+[INFO] Startup dependency summary {"nodeEnv":"development","mongo":"[REDACTED]","redisRequired":"[REDACTED]","redisReady":"[REDACTED]","redisStatus":"[REDACTED]","bootstrapUserEnabled":true,"firebaseEnabled":false}
+[WARN] Running in degraded mode: Redis is unavailable but not required 
+[INFO] API running on http://0.0.0.0:5001 

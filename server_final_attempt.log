@@ -1,0 +1,27 @@
+
+> stugram-backend@2.0.0 dev
+> nodemon server.js
+
+[33m[nodemon] 3.1.14[39m
+[33m[nodemon] to restart at any time, enter `rs`[39m
+[33m[nodemon] watching path(s): *.*[39m
+[33m[nodemon] watching extensions: js,mjs,cjs,json[39m
+[32m[nodemon] starting `node server.js`[39m
+[WARN] Firebase Admin not configured; push delivery disabled 
+/Users/jahongir/Downloads/android app/backend/node_modules/nodemon/node_modules/minimatch/dist/commonjs/index.js:157
+    return (0, brace_expansion_1.expand)(pattern, { max: options.braceExpandMax });
+                                        ^
+
+TypeError: (0 , brace_expansion_1.expand) is not a function
+    at braceExpand (/Users/jahongir/Downloads/android app/backend/node_modules/nodemon/node_modules/minimatch/dist/commonjs/index.js:157:41)
+    at Minimatch.braceExpand (/Users/jahongir/Downloads/android app/backend/node_modules/nodemon/node_modules/minimatch/dist/commonjs/index.js:898:40)
+    at Minimatch.make (/Users/jahongir/Downloads/android app/backend/node_modules/nodemon/node_modules/minimatch/dist/commonjs/index.js:268:41)
+    at new Minimatch (/Users/jahongir/Downloads/android app/backend/node_modules/nodemon/node_modules/minimatch/dist/commonjs/index.js:238:14)
+    at minimatch (/Users/jahongir/Downloads/android app/backend/node_modules/nodemon/node_modules/minimatch/dist/commonjs/index.js:15:12)
+    at /Users/jahongir/Downloads/android app/backend/node_modules/nodemon/lib/monitor/match.js:263:14
+    at Array.filter (<anonymous>)
+    at match (/Users/jahongir/Downloads/android app/backend/node_modules/nodemon/lib/monitor/match.js:261:17)
+    at FSWatcher.filterAndRestart (/Users/jahongir/Downloads/android app/backend/node_modules/nodemon/lib/monitor/watch.js:175:19)
+    at FSWatcher.emit (node:events:508:20)
+
+Node.js v25.8.2

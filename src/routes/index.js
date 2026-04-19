@@ -1,0 +1,53 @@
+const express = require("express");
+
+const authRoutes = require("./authRoutes");
+const profileRoutes = require("./profileRoutes");
+const settingsRoutes = require("./settingsRoutes");
+const postRoutes = require("./postRoutes");
+const storyRoutes = require("./storyRoutes");
+const followRoutes = require("./followRoutes");
+const likeRoutes = require("./likeRoutes");
+const commentRoutes = require("./commentRoutes");
+const notificationRoutes = require("./notificationRoutes");
+const blocksRoutes = require("./blocksRoutes");
+const closeFriendRoutes = require("./closeFriendRoutes");
+const deviceRoutes = require("./deviceRoutes");
+const supportRoutes = require("./supportRoutes");
+const activityRoutes = require("./activityRoutes");
+const searchRoutes = require("./searchRoutes");
+const exploreRoutes = require("./exploreRoutes");
+const chatRoutes = require("./chatRoutes");
+const groupChatRoutes = require("./groupChatRoutes");
+const callRoutes = require("./callRoutes");
+const adminRoutes = require("./adminRoutes");
+const recommendationRoutes = require("./recommendationRoutes");
+const adminPanelRoutes = require("../modules/admin/routes/adminPanelRoutes");
+const reportRoutes = require("../modules/reports/routes/reportRoutes");
+
+const router = express.Router();
+
+router.use("/auth", authRoutes);
+router.use("/profiles", profileRoutes);
+router.use("/settings", settingsRoutes);
+router.use("/posts", postRoutes);
+router.use("/stories", storyRoutes);
+router.use("/follows", followRoutes);
+router.use("/likes", likeRoutes);
+router.use("/comments", commentRoutes);
+router.use("/notifications", notificationRoutes);
+router.use("/blocks", blocksRoutes);
+router.use("/close-friends", closeFriendRoutes);
+router.use("/devices", deviceRoutes);
+router.use("/support", supportRoutes);
+router.use("/activity", activityRoutes);
+router.use("/search", searchRoutes);
+router.use("/explore", exploreRoutes);
+router.use("/chats", chatRoutes);
+router.use("/group-chats", groupChatRoutes);
+router.use("/calls", callRoutes);
+router.use("/admin", adminPanelRoutes);
+router.use("/admin", adminRoutes);
+router.use("/reports", reportRoutes);
+router.use("/", recommendationRoutes);
+
+module.exports = router;

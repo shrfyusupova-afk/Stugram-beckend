@@ -1,0 +1,4 @@
+[WARN] Firebase Admin not configured; push delivery disabled 
+[INFO] MongoDB connected 
+[WARN] Failed to ensure users.identity index {"message":"Index exists but options differ","existingName":"identity_1","existingUnique":true,"existingSparse":false,"expectedUnique":true,"expectedSparse":true}
+[WARN] Slow Mongo query detected {"model":"User","operation":"findOne","durationMs":1544.87,"filter":{"identity":"shrfyusupova@gmail.com"}}
