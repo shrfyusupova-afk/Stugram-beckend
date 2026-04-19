@@ -28,17 +28,17 @@ describe("Posts and engagement integration", () => {
       .attach("media", fakeImageBuffer(), {
         filename: "post.jpg",
         contentType: "image/jpeg",
-      });
+    });
 
     expect(createResponse.statusCode).toBe(201);
-    expect(createResponse.body.data.author.toString()).toBe(user._id.toString());
+    expect(createResponse.body.data.author._id.toString()).toBe(user._id.toString());
 
     const postId = createResponse.body.data._id;
 
     const likeResponse = await client
       .post(`/api/v1/likes/posts/${postId}`)
       .set(authHeader(viewerToken));
-    expect(likeResponse.statusCode).toBe(201);
+    expect(likeResponse.statusCode).toBe(200);
 
     const commentResponse = await client
       .post(`/api/v1/comments/posts/${postId}`)

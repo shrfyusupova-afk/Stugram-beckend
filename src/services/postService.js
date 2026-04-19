@@ -3,10 +3,12 @@ const Post = require("../models/Post");
 const SavedPost = require("../models/SavedPost");
 const User = require("../models/User");
 const Follow = require("../models/Follow");
+const Block = require("../models/Block");
 const Comment = require("../models/Comment");
 const PostLike = require("../models/PostLike");
+const UserContentPreference = require("../models/UserContentPreference");
 const { destroyCloudinaryAsset, uploadBufferToCloudinary } = require("../utils/media");
-const { getPagination } = require("../utils/pagination");
+const { getPagination, buildPaginationMeta } = require("../utils/pagination");
 
 const normalizeHashtags = (hashtags = []) =>
   [...new Set(hashtags.map((tag) => tag.replace(/^#/, "").toLowerCase()))];
@@ -58,22 +60,33 @@ const createPost = async (userId, payload, files) => {
   }
 
   const media = await mapMediaFiles(files, "stugram/posts");
-  const post = await Post.create({
-    author: userId,
-    media,
-    caption: payload.caption || "",
-    hashtags: normalizeHashtags(payload.hashtags || []),
-    location: payload.location || "",
-  });
+  let post = null;
+  try {
+    post = await Post.create({
+      author: userId,
+      media,
+      caption: payload.caption || "",
+      hashtags: normalizeHashtags(payload.hashtags || []),
+      location: payload.location || "",
+    });
 
-  await User.findByIdAndUpdate(userId, { $inc: { postsCount: 1 } });
-  const createdPost = await Post.findById(post._id).populate(previewPopulate).lean();
-  return {
-    ...createdPost,
-    savesCount: 0,
-    viewerHasLiked: false,
-    viewerHasSaved: false,
-  };
+    await User.findByIdAndUpdate(userId, { $inc: { postsCount: 1 } });
+    const createdPost = await Post.findById(post._id).populate(previewPopulate).lean();
+    return {
+      ...createdPost,
+      savesCount: 0,
+      viewerHasLiked: false,
+      viewerHasSaved: false,
+    };
+  } catch (error) {
+    if (post?._id) {
+      await Post.findByIdAndDelete(post._id).catch(() => null);
+    }
+    await Promise.allSettled(
+      media.map((item) => destroyCloudinaryAsset(item.publicId, item.type === "video" ? "video" : "image"))
+    );
+    throw error;
+  }
 };
 
 const savePost = async (userId, postId) => {
@@ -171,30 +184,49 @@ const getUserPosts = async (viewerId, username, query) => {
   if (!canView) throw new ApiError(403, "This profile is private");
 
   const { page, limit, skip } = getPagination(query);
+  const filter = { author: owner.id, isHiddenByAdmin: { $ne: true } };
   const [items, total] = await Promise.all([
-    Post.find({ author: owner.id }).sort({ createdAt: -1 }).skip(skip).limit(limit).populate("author", "username fullName avatar"),
-    Post.countDocuments({ author: owner.id }),
+    Post.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).populate("author", "username fullName avatar"),
+    Post.countDocuments(filter),
   ]);
 
-  return { items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  return { items, meta: buildPaginationMeta({ page, limit, total }) };
 };
 
 const getFeed = async (userId, query) => {
   const { page, limit, skip } = getPagination(query);
-  const followIds = await Follow.find({ follower: userId }).distinct("following");
-  const authorIds = [userId, ...followIds];
+  const [followIds, blocks, hiddenPostIds, publicAuthorIds] = await Promise.all([
+    Follow.find({ follower: userId }).distinct("following"),
+    Block.find({ $or: [{ blocker: userId }, { blocked: userId }] }).select("blocker blocked").lean(),
+    UserContentPreference.find({
+      user: userId,
+      preferenceType: { $in: ["hide", "not_interested"] },
+    }).distinct("post"),
+    User.distinct("_id", { isPrivateAccount: { $ne: true }, isSuspended: { $ne: true } }),
+  ]);
+
+  const blockedIds = new Set();
+  for (const block of blocks) {
+    blockedIds.add(String(block.blocker));
+    blockedIds.add(String(block.blocked));
+  }
+  blockedIds.delete(String(userId));
+
+  const authorIds = [...new Set([String(userId), ...followIds.map(String), ...publicAuthorIds.map(String)])].filter(
+    (id) => !blockedIds.has(id)
+  );
 
   const [items, total] = await Promise.all([
-    Post.find({ author: { $in: authorIds } })
+    Post.find({ author: { $in: authorIds }, _id: { $nin: hiddenPostIds }, isHiddenByAdmin: { $ne: true } })
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .populate("author", "username fullName avatar")
       .lean(),
-    Post.countDocuments({ author: { $in: authorIds } }),
+    Post.countDocuments({ author: { $in: authorIds }, _id: { $nin: hiddenPostIds }, isHiddenByAdmin: { $ne: true } }),
   ]);
 
-  return { items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  return { items, meta: buildPaginationMeta({ page, limit, total }) };
 };
 
 const getSavedPosts = async (userId, query) => {

@@ -1,7 +1,11 @@
 const bcrypt = require("bcryptjs");
 
-const fakeImageBuffer = () => Buffer.from("fake-image-content");
-const fakeVideoBuffer = () => Buffer.from("fake-video-content");
+const fakeImageBuffer = () =>
+  Buffer.from(
+    "ffd8ffe000104a46494600010101006000600000ffdb0043000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffd9",
+    "hex"
+  );
+const fakeVideoBuffer = () => Buffer.from("000000186674797069736f6d0000020069736f6d69736f3261766331", "hex");
 
 let uniqueCounter = 0;
 const nextUnique = () => {
@@ -12,7 +16,10 @@ const nextUnique = () => {
 const getModels = () => ({
   User: require("../../src/models/User"),
   Post: require("../../src/models/Post"),
+  SavedPost: require("../../src/models/SavedPost"),
   Story: require("../../src/models/Story"),
+  StoryComment: require("../../src/models/StoryComment"),
+  StoryLike: require("../../src/models/StoryLike"),
   Follow: require("../../src/models/Follow"),
   Conversation: require("../../src/models/Conversation"),
   Message: require("../../src/models/Message"),

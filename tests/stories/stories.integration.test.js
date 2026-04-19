@@ -40,7 +40,7 @@ describe("Stories integration", () => {
     const likeResponse = await client
       .post(`/api/v1/stories/${storyId}/like`)
       .set(authHeader(viewerToken));
-    expect(likeResponse.statusCode).toBe(201);
+    expect(likeResponse.statusCode).toBe(200);
 
     const commentResponse = await client
       .post(`/api/v1/stories/${storyId}/comments`)

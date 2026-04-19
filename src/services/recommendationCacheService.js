@@ -184,6 +184,19 @@ const enqueueAsyncRecommendationRefresh = async ({ userId, surfaces = [], reason
   const uniqueSurfaces = [...new Set(surfaces.filter(Boolean))];
   if (!uniqueSurfaces.length) return [];
 
+  if (env.recommendationMode === "db-direct" || !env.queueEnabled || !env.recommendationWorkerEnabled) {
+    logger.info("Skipping async recommendation refresh because closed-alpha db-direct mode is active", {
+      userId,
+      surfaces: uniqueSurfaces,
+      reason,
+      version,
+      recommendationMode: env.recommendationMode,
+      queueEnabled: env.queueEnabled,
+      recommendationWorkerEnabled: env.recommendationWorkerEnabled,
+    });
+    return [];
+  }
+
   const queued = [];
 
   for (const surface of uniqueSurfaces) {

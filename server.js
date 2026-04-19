@@ -125,6 +125,11 @@ const logStartupSummary = () => {
     redisUsernameConfigured: redis.usernameConfigured,
     redisRetryPolicy: redis.retryPolicy,
     redisLastFailure: redis.lastFailure,
+    queueEnabled: env.queueEnabled,
+    workerRequired: env.workerRequired,
+    recommendationWorkerEnabled: env.recommendationWorkerEnabled,
+    recommendationMode: env.recommendationMode,
+    cacheMode: env.cacheMode,
     bootstrapUserEnabled: env.enableBootstrapUser,
     firebaseEnabled: isFirebaseEnabled(),
     cloudinaryConfigured: isCloudinaryConfigured(),
@@ -135,7 +140,11 @@ const logStartupSummary = () => {
   }
 
   if (!env.redisRequired && !isRedisReady()) {
-    logger.warn("Running in degraded mode: Redis is unavailable but not required");
+    if (env.recommendationMode === "db-direct" && !env.workerRequired) {
+      logger.warn("Redis optional support is unavailable; closed-alpha db-direct mode will continue without queue/cache support");
+    } else {
+      logger.warn("Running in degraded mode: Redis is unavailable but not required");
+    }
   }
 };
 

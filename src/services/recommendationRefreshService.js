@@ -37,10 +37,24 @@ const normalizeSurfaces = (surfaces = []) => [...new Set(surfaces.filter((surfac
 const normalizeJobName = (jobName) => (jobName && JOB_NAME_TO_SURFACE[jobName] ? jobName : null);
 const getRecommendationRefreshQueue = () => recommendationQueue.getRecommendationRefreshQueue();
 const isRecommendationRefreshAvailable = () => Boolean(getRecommendationRefreshQueue()) && recommendationQueue.isRecommendationQueueReady();
+const isRecommendationRefreshDisabledForClosedAlpha = () =>
+  !env.queueEnabled || !env.recommendationWorkerEnabled || env.recommendationMode === "db-direct";
 
 const enqueueRecommendationRefreshJobs = async ({ userId, surfaces = [], reason = "strong_signal", version = null }) => {
   const normalizedSurfaces = normalizeSurfaces(surfaces);
   if (!normalizedSurfaces.length) return [];
+
+  if (isRecommendationRefreshDisabledForClosedAlpha()) {
+    logger.info("Recommendation refresh queue intentionally disabled; using db-direct recommendations", {
+      userId,
+      surfaces: normalizedSurfaces,
+      reason,
+      recommendationMode: env.recommendationMode,
+      queueEnabled: env.queueEnabled,
+      recommendationWorkerEnabled: env.recommendationWorkerEnabled,
+    });
+    return [];
+  }
 
   recommendationQueue.initRecommendationRefreshQueueResources();
 
@@ -197,6 +211,52 @@ const createReplayAudit = async ({
   });
 
 const getRecommendationRefreshQueueHealth = async () => {
+  if (isRecommendationRefreshDisabledForClosedAlpha()) {
+    return {
+      redis: getRedisStatus(),
+      queue: {
+        counts: {
+          waiting: 0,
+          active: 0,
+          completed: 0,
+          failed: 0,
+          delayed: 0,
+        },
+        recentFailedJobs: [],
+        recentDeadLetters: [],
+        enabled: false,
+        configured: false,
+        ready: false,
+        required: false,
+        mode: "disabled-for-closed-alpha",
+        reason: "Closed alpha uses db-direct recommendations and does not require a paid background worker",
+      },
+      worker: {
+        required: env.workerRequired,
+        enabled: env.recommendationWorkerEnabled,
+        status: "not-required",
+        stale: false,
+        mode: "disabled-for-closed-alpha",
+      },
+      metrics: {
+        global: {
+          queuedCount: 0,
+          completedCount: 0,
+          failedCount: 0,
+          retryCount: 0,
+          deadLetterCount: 0,
+          averageProcessingLatencyMs: 0,
+          lastSuccessAt: null,
+          lastFailureAt: null,
+          lastDeadLetterAt: null,
+          lastRetryMeta: null,
+          lastFailureMeta: null,
+        },
+        perJobType: {},
+      },
+    };
+  }
+
   recommendationQueue.initRecommendationRefreshQueueResources();
 
   if (!isRecommendationRefreshAvailable()) {

@@ -52,6 +52,10 @@ const storySchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    commentsCount: {
+      type: Number,
+      default: 0,
+    },
     repliesCount: {
       type: Number,
       default: 0,

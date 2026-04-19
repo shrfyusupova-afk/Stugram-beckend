@@ -48,7 +48,7 @@ const cleanupStalePushTokens = async () => {
   const cutoff = subtractDays(env.inactivePushTokenRetentionDays);
   const result = await DevicePushToken.deleteMany({
     isActive: false,
-    updatedAt: { $lte: cutoff },
+    $or: [{ updatedAt: { $lte: cutoff } }, { lastSeenAt: { $lte: cutoff } }],
   });
 
   return { deletedPushTokens: result.deletedCount || 0 };
@@ -58,7 +58,7 @@ const cleanupOldSessions = async () => {
   const cutoff = subtractDays(env.revokedSessionRetentionDays);
   const result = await Session.deleteMany({
     isRevoked: true,
-    updatedAt: { $lte: cutoff },
+    $or: [{ updatedAt: { $lte: cutoff } }, { lastUsedAt: { $lte: cutoff } }],
   });
 
   return { deletedRevokedSessions: result.deletedCount || 0 };
@@ -68,7 +68,15 @@ const cleanupPasswordResetArtifacts = async () => {
   const cutoff = subtractDays(env.passwordResetRetentionDays);
   const result = await PasswordResetToken.deleteMany({
     $or: [{ usedAt: { $ne: null } }, { expiresAt: { $lte: new Date() } }],
-    updatedAt: { $lte: cutoff },
+    $and: [
+      {
+        $or: [
+          { updatedAt: { $lte: cutoff } },
+          { usedAt: { $lte: cutoff } },
+          { expiresAt: { $lte: cutoff } },
+        ],
+      },
+    ],
   });
 
   return { deletedPasswordResetArtifacts: result.deletedCount || 0 };

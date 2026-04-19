@@ -220,7 +220,7 @@ describe("Chat integration", () => {
       .field("name", "Core Team Updated");
 
     expect(updateGroupResponse.statusCode).toBe(200);
-    expect(updateGroupResponse.body.data.name).toBe("Core Team Updated");
+    expect(updateGroupResponse.body.data.group.name).toBe("Core Team Updated");
 
     const groupMembersResponse = await client
       .get(`/api/v1/group-chats/${groupId}/members`)

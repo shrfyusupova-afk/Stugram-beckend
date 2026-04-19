@@ -83,6 +83,9 @@ describe("Recommendation refresh queue integration", () => {
     RecommendationReplayAudit.__reset();
     jest.clearAllMocks();
     env.redisRequired = true;
+    env.queueEnabled = true;
+    env.recommendationWorkerEnabled = true;
+    env.recommendationMode = "weighted-cache";
   });
 
   it("enqueues recommendation refresh jobs once per surface within the dedupe window and records metrics", async () => {
@@ -237,6 +240,9 @@ describe("Recommendation refresh queue integration", () => {
 
   it("returns a disabled queue summary safely when Redis-backed refresh is unavailable", async () => {
     env.redisRequired = false;
+    env.queueEnabled = false;
+    env.recommendationWorkerEnabled = false;
+    env.recommendationMode = "db-direct";
 
     const health = await getRecommendationRefreshQueueHealth();
     const jobs = await enqueueRecommendationRefreshJobs({
@@ -247,6 +253,7 @@ describe("Recommendation refresh queue integration", () => {
 
     expect(health.queue.enabled).toBe(false);
     expect(health.queue.counts.waiting).toBe(0);
+    expect(health.queue.mode).toBe("disabled-for-closed-alpha");
     expect(jobs).toEqual([]);
     expect(recommendationRefreshQueue.add).not.toHaveBeenCalled();
   });

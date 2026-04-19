@@ -137,9 +137,14 @@ const uploadAvatar = async (currentUserId, file) => {
 
   const upload = await uploadBufferToCloudinary(file.buffer, "stugram/avatars", "image");
   const previousAvatarPublicId = currentUser.avatarPublicId;
-  currentUser.avatar = upload.url;
-  currentUser.avatarPublicId = upload.publicId;
-  await currentUser.save();
+  try {
+    currentUser.avatar = upload.url;
+    currentUser.avatarPublicId = upload.publicId;
+    await currentUser.save();
+  } catch (error) {
+    await destroyCloudinaryAsset(upload.publicId, "image").catch(() => null);
+    throw error;
+  }
 
   if (previousAvatarPublicId && previousAvatarPublicId !== upload.publicId) {
     await destroyCloudinaryAsset(previousAvatarPublicId, "image").catch(() => null);
@@ -165,9 +170,14 @@ const uploadBanner = async (currentUserId, file) => {
   const upload = await uploadBufferToCloudinary(file.buffer, "stugram/banners", "image");
   const previousBannerPublicId = currentUser.bannerPublicId;
 
-  currentUser.banner = upload.url;
-  currentUser.bannerPublicId = upload.publicId;
-  await currentUser.save();
+  try {
+    currentUser.banner = upload.url;
+    currentUser.bannerPublicId = upload.publicId;
+    await currentUser.save();
+  } catch (error) {
+    await destroyCloudinaryAsset(upload.publicId, "image").catch(() => null);
+    throw error;
+  }
 
   if (previousBannerPublicId && previousBannerPublicId !== upload.publicId) {
     await destroyCloudinaryAsset(previousBannerPublicId, "image").catch(() => null);
@@ -192,7 +202,7 @@ const getProfileReels = async (viewerId, username, query = {}) => {
   }
 
   const { page, limit, skip } = getPagination(query);
-  const filter = { author: owner._id, "media.type": "video" };
+  const filter = { author: owner._id, "media.type": "video", isHiddenByAdmin: { $ne: true } };
   const [items, total] = await Promise.all([
     Post.find(filter)
       .sort({ createdAt: -1 })

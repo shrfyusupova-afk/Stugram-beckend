@@ -357,20 +357,28 @@ const createGroupChat = async (currentUserId, payload, file = null) => {
     uploadedAvatar = await uploadBufferToCloudinary(file.buffer, "stugram/group-chats", "image");
   }
 
-  const group = await GroupConversation.create({
-    name: payload.name.trim(),
-    avatar: uploadedAvatar?.url || null,
-    avatarPublicId: uploadedAvatar?.publicId || null,
-    owner: currentUserId,
-    members: [
-      { user: currentUserId },
-      ...resolvedMembers.map((member) => ({
-        user: member._id,
-      })),
-    ],
-    lastMessage: "",
-    lastMessageAt: new Date(),
-  });
+  let group = null;
+  try {
+    group = await GroupConversation.create({
+      name: payload.name.trim(),
+      avatar: uploadedAvatar?.url || null,
+      avatarPublicId: uploadedAvatar?.publicId || null,
+      owner: currentUserId,
+      members: [
+        { user: currentUserId },
+        ...resolvedMembers.map((member) => ({
+          user: member._id,
+        })),
+      ],
+      lastMessage: "",
+      lastMessageAt: new Date(),
+    });
+  } catch (error) {
+    if (uploadedAvatar?.publicId) {
+      await destroyCloudinaryAsset(uploadedAvatar.publicId, "image").catch(() => null);
+    }
+    throw error;
+  }
 
   const hydratedGroup = await populateGroupConversationRelations(GroupConversation.findById(group._id));
   await createAuditLog({
@@ -547,23 +555,34 @@ const createMessageRecord = async ({ currentUserId, group, payload, file = null 
   }
 
   const memberIds = group.members.map((member) => member.user._id.toString());
-  const message = await GroupMessage.create({
-    groupConversation: group._id,
-    sender: currentUserId,
-    text: payload.text?.trim() || "",
-    messageType,
-    media,
-    metadata: parseStructuredMetadata(payload.text),
-    replyToMessage: replyTarget?._id || null,
-    seenBy: [currentUserId],
-    seenByRecords: [{ user: currentUserId, seenAt: new Date() }],
-    deletedFor: [],
-  });
+  let message = null;
+  try {
+    message = await GroupMessage.create({
+      groupConversation: group._id,
+      sender: currentUserId,
+      text: payload.text?.trim() || "",
+      messageType,
+      media,
+      metadata: parseStructuredMetadata(payload.text),
+      replyToMessage: replyTarget?._id || null,
+      seenBy: [currentUserId],
+      seenByRecords: [{ user: currentUserId, seenAt: new Date() }],
+      deletedFor: [],
+    });
 
-  await GroupConversation.findByIdAndUpdate(group._id, {
-    lastMessage: buildMessagePreview(message),
-    lastMessageAt: message.createdAt,
-  });
+    await GroupConversation.findByIdAndUpdate(group._id, {
+      lastMessage: buildMessagePreview(message),
+      lastMessageAt: message.createdAt,
+    });
+  } catch (error) {
+    if (message?._id) {
+      await GroupMessage.findByIdAndDelete(message._id).catch(() => null);
+    }
+    if (media?.publicId) {
+      await destroyCloudinaryAsset(media.publicId, messageType === "file" ? "raw" : messageType === "image" ? "image" : "video").catch(() => null);
+    }
+    throw error;
+  }
 
   const populatedMessage = await populateMessageRelations(GroupMessage.findById(message._id));
 
@@ -866,6 +885,7 @@ const addGroupMembers = async (currentUserId, groupId, payload) => {
   return {
     group: formatGroupConversation({ group: updatedGroup, currentUserId, unreadCount: 0 }),
     addedMemberIds: usersToAdd.map((member) => member._id.toString()),
+    membersCount: updatedGroup.members.length,
     participantIds: updatedGroup.members.map((member) => member.user._id.toString()),
   };
 };
@@ -887,7 +907,14 @@ const updateGroupChat = async (currentUserId, groupId, payload, file = null) => 
     group.avatarPublicId = newAvatar.publicId;
   }
 
-  await group.save();
+  try {
+    await group.save();
+  } catch (error) {
+    if (newAvatar?.publicId) {
+      await destroyCloudinaryAsset(newAvatar.publicId, "image").catch(() => null);
+    }
+    throw error;
+  }
 
   if (file && previousAvatarPublicId && previousAvatarPublicId !== newAvatar.publicId) {
     await destroyCloudinaryAsset(previousAvatarPublicId, "image").catch(() => null);

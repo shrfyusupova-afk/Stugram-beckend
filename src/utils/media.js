@@ -19,6 +19,11 @@ const uploadBufferToCloudinary = (fileBuffer, folder, resourceType = "auto") =>
           return;
         }
 
+        if (!result?.secure_url || !result?.public_id || !result?.resource_type) {
+          reject(new ApiError(502, "Media upload returned an incomplete response"));
+          return;
+        }
+
         resolve({
           url: result.secure_url,
           publicId: result.public_id,

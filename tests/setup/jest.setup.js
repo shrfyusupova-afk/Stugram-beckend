@@ -29,6 +29,7 @@ const createInMemoryRedis = () => {
   };
 
   return {
+    status: "ready",
     on: jest.fn(),
     quit: jest.fn().mockResolvedValue(undefined),
     duplicate() {
@@ -41,6 +42,10 @@ const createInMemoryRedis = () => {
     },
     async pexpire(key, ttlMs) {
       expiry.set(key, Date.now() + ttlMs);
+      return 1;
+    },
+    async expire(key, ttlSeconds) {
+      expiry.set(key, Date.now() + Number(ttlSeconds || 0) * 1000);
       return 1;
     },
     async pttl(key) {
@@ -201,9 +206,31 @@ jest.mock("google-auth-library", () => ({
   },
 }));
 
-jest.mock("../../src/config/redis", () => ({
-  redis: createInMemoryRedis(),
-}));
+jest.mock("../../src/config/redis", () => {
+  const redis = createInMemoryRedis();
+  return {
+    redis,
+    isRedisReady: jest.fn(() => true),
+    getRedisStatus: jest.fn(() => ({
+      required: false,
+      mode: "connected",
+      status: "ready",
+      ready: true,
+      connected: true,
+      host: "127.0.0.1",
+      port: 6379,
+      urlConfigured: true,
+      configSource: "url",
+      tlsEnabled: false,
+      tlsRejectUnauthorized: true,
+      retryPolicy: "test",
+      lastFailure: null,
+      lastConnectedAt: new Date().toISOString(),
+    })),
+    buildRedisClientOptions: jest.fn(() => ({})),
+    REDIS_RETRY_POLICY: "test",
+  };
+});
 
 jest.mock("../../src/queues/recommendationRefreshQueue", () => ({
   RECOMMENDATION_REFRESH_QUEUE_NAME: "recommendation-refresh",
@@ -232,6 +259,24 @@ jest.mock("../../src/queues/recommendationRefreshQueue", () => ({
     on: jest.fn(),
     close: jest.fn().mockResolvedValue(undefined),
   },
+  recommendationQueueConfigured: true,
+  initRecommendationRefreshQueueResources: jest.fn(() => ({
+    initialized: true,
+    ready: true,
+  })),
+  getRecommendationRefreshQueue: jest.fn(function getRecommendationRefreshQueue() {
+    return this.recommendationRefreshQueue;
+  }),
+  getRecommendationRefreshQueueEvents: jest.fn(function getRecommendationRefreshQueueEvents() {
+    return this.recommendationRefreshQueueEvents;
+  }),
+  getRecommendationRefreshConnection: jest.fn(function getRecommendationRefreshConnection() {
+    return this.recommendationRefreshConnection;
+  }),
+  getRecommendationRefreshEventsConnection: jest.fn(function getRecommendationRefreshEventsConnection() {
+    return this.recommendationRefreshConnection;
+  }),
+  isRecommendationQueueReady: jest.fn(() => true),
   closeRecommendationQueueResources: jest.fn().mockResolvedValue(undefined),
 }));
 
@@ -286,6 +331,27 @@ jest.mock("../../src/services/pushNotificationService", () => ({
     successCount: 1,
     failureCount: 0,
     invalidatedTokens: 0,
+  }),
+  buildChatMessagePushPayload: jest.fn((payload = {}) => ({
+    title: payload.senderName || "New message",
+    body: payload.previewText || "New message",
+    data: {
+      type: payload.type === "group_chat" ? "group_chat" : "chat",
+      targetId: payload.groupId || payload.conversationId || null,
+      conversationId: payload.conversationId || null,
+      groupId: payload.groupId || null,
+      messageId: payload.messageId || null,
+      senderId: payload.senderId || null,
+    },
+    notificationType: "message",
+  })),
+  buildChatMessagePreviewText: jest.fn((message = {}) => {
+    if (message.messageType === "image") return "Photo";
+    if (message.messageType === "video") return "Video";
+    if (message.messageType === "voice") return "Voice message";
+    if (message.messageType === "round_video") return "Round video";
+    if (message.messageType === "file") return message.media?.fileName || "File";
+    return message.text?.trim() || "Message";
   }),
 }));
 

@@ -17,6 +17,26 @@ const recommendationRefreshService = require("./services/recommendationRefreshSe
 
 const app = express();
 
+const isClosedAlphaNoWorkerMode = () =>
+  env.recommendationMode === "db-direct" && (!env.queueEnabled || !env.recommendationWorkerEnabled);
+
+const getCacheMode = (redis) => {
+  if (redis.connected) return "enabled";
+  if (env.cacheMode === "disabled") return "disabled";
+  if (isClosedAlphaNoWorkerMode() && !redis.required) return "redis-optional-unavailable";
+  return redis.required ? "required-failed" : "optional-degraded";
+};
+
+const buildRuntimeMode = (redis, queueHealth) => ({
+  closedAlphaNoWorker: isClosedAlphaNoWorkerMode(),
+  recommendationMode: env.recommendationMode,
+  queueEnabled: env.queueEnabled,
+  workerRequired: env.workerRequired,
+  recommendationWorkerEnabled: env.recommendationWorkerEnabled,
+  queueIntentionallyDisabled: queueHealth?.queue?.mode === "disabled-for-closed-alpha",
+  cacheMode: getCacheMode(redis),
+});
+
 const getQueueHealthSnapshot = async () => {
   try {
     return await recommendationRefreshService.getRecommendationRefreshQueueHealth();
@@ -82,7 +102,13 @@ app.get("/health", (_req, res) => {
           redisConfigSource: redis.configSource,
           redis,
           queueHealth,
-          cacheMode: redis.connected ? "enabled" : redis.required ? "required-failed" : "optional-degraded",
+          cacheMode: getCacheMode(redis),
+          recommendationMode: env.recommendationMode,
+          queueEnabled: env.queueEnabled,
+          workerRequired: env.workerRequired,
+          recommendationWorkerEnabled: env.recommendationWorkerEnabled,
+          closedAlphaNoWorker: isClosedAlphaNoWorkerMode(),
+          runtimeMode: buildRuntimeMode(redis, queueHealth),
           pushEnabled: pushStatus.enabled,
           cloudinaryConfigured: isCloudinaryConfigured(),
         },
@@ -111,7 +137,8 @@ app.get("/readyz", (_req, res) => {
           ? isPrimaryDatabaseReady()
           : isPrimaryDatabaseReady() || isMemoryFallbackReady();
       const redisReady = env.redisRequired ? isRedisReady() : true;
-      const ready = mongoReady && redisReady;
+      const queueReady = env.workerRequired ? queueHealth?.queue?.enabled === true && queueHealth?.queue?.ready === true : true;
+      const ready = mongoReady && redisReady && queueReady;
 
       res.status(ready ? 200 : 503).json({
         success: ready,
@@ -132,7 +159,13 @@ app.get("/readyz", (_req, res) => {
           redisConfigSource: redis.configSource,
           redis,
           queueHealth,
-          cacheMode: redis.connected ? "enabled" : redis.required ? "required-failed" : "optional-degraded",
+          cacheMode: getCacheMode(redis),
+          recommendationMode: env.recommendationMode,
+          queueEnabled: env.queueEnabled,
+          workerRequired: env.workerRequired,
+          recommendationWorkerEnabled: env.recommendationWorkerEnabled,
+          closedAlphaNoWorker: isClosedAlphaNoWorkerMode(),
+          runtimeMode: buildRuntimeMode(redis, queueHealth),
           pushEnabled: getFirebaseStatus().enabled,
           cloudinaryConfigured: isCloudinaryConfigured(),
         },

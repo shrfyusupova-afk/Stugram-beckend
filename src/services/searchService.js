@@ -1,7 +1,7 @@
 const User = require("../models/User");
 const Post = require("../models/Post");
 const SearchHistory = require("../models/SearchHistory");
-const { getPagination } = require("../utils/pagination");
+const { getPagination, buildPaginationMeta } = require("../utils/pagination");
 const { getFollowStatusesForUsers } = require("./followService");
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -48,7 +48,7 @@ const searchUsers = async (query, viewerId = null) => {
       ...item,
       followStatus: statuses.get(String(item._id)) || "not_following",
     })),
-    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    meta: buildPaginationMeta({ page, limit, total }),
   };
 };
 
@@ -93,7 +93,7 @@ const searchUsersAdvanced = async (query, viewerId = null) => {
       ...mapUserPreview(item),
       followStatus: statuses.get(String(item._id)) || "not_following",
     })),
-    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    meta: buildPaginationMeta({ page, limit, total }),
   };
 };
 
@@ -112,7 +112,7 @@ const searchPosts = async (query) => {
       .lean(),
     Post.countDocuments(filter),
   ]);
-  return { items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  return { items, meta: buildPaginationMeta({ page, limit, total }) };
 };
 
 const searchHashtags = async (query) => {

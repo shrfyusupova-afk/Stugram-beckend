@@ -6,4 +6,12 @@ const getPagination = (query = {}) => {
   return { page, limit, skip };
 };
 
-module.exports = { getPagination };
+const buildPaginationMeta = ({ page, limit, total, extra = {} }) => ({
+  page,
+  limit,
+  total,
+  totalPages: Math.max(Math.ceil(total / limit), 1),
+  ...extra,
+});
+
+module.exports = { getPagination, buildPaginationMeta };

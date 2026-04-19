@@ -10,6 +10,7 @@
     "worker:recommendations": "node src/workers/runRecommendationRefreshWorker.js",
     "maintenance:cleanup": "node src/scripts/runMaintenanceCleanup.js",
     "diagnose:atlas": "node src/scripts/diagnoseAtlas.js",
+    "smoke:production": "node src/scripts/smokeProduction.js",
     "lint": "eslint .",
     "check": "node -e \"console.log('Backend structure ready')\"",
     "test": "NODE_ENV=test jest --runInBand --detectOpenHandles",

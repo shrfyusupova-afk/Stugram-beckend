@@ -1,10 +1,13 @@
 const mongoose = require("mongoose");
 
+const { env } = require("../config/env");
 const { getPagination } = require("../utils/pagination");
 const Post = require("../models/Post");
 const Follow = require("../models/Follow");
 const PostLike = require("../models/PostLike");
 const User = require("../models/User");
+const Block = require("../models/Block");
+const UserContentPreference = require("../models/UserContentPreference");
 const UserReport = require("../models/UserReport");
 const ContentFeature = require("../models/ContentFeature");
 const UserInterestProfile = require("../models/UserInterestProfile");
@@ -158,6 +161,111 @@ const buildMeta = (page, limit, total) => ({
   explorationRatio: EXPLORATION_RATIO,
 });
 
+const buildDirectMeta = (page, limit, total, surface) => ({
+  page,
+  limit,
+  total,
+  totalPages: Math.max(Math.ceil(total / limit), 1),
+  strategy: "closed-alpha-db-direct-v1",
+  recommendationMode: "db-direct",
+  surface,
+});
+
+const loadBlockedUserIds = async (userId) => {
+  const blocks = await Block.find({ $or: [{ blocker: userId }, { blocked: userId }] }).select("blocker blocked").lean();
+  const blockedIds = new Set();
+
+  for (const block of blocks) {
+    blockedIds.add(String(block.blocker));
+    blockedIds.add(String(block.blocked));
+  }
+
+  blockedIds.delete(String(userId));
+  return [...blockedIds];
+};
+
+const loadHiddenPostIds = async (userId) => {
+  const hiddenIds = await UserContentPreference.find({
+    user: userId,
+    preferenceType: { $in: ["hide", "not_interested"] },
+  }).distinct("post");
+
+  return hiddenIds.map((item) => String(item));
+};
+
+const getDirectDbFeed = async (userId, query, { surface = "feed" } = {}) => {
+  const { page, limit, skip } = getPagination(query);
+  const normalizedSurface = surface === "reels" ? "reels" : "feed";
+  const candidateLimit = Math.min(Math.max(skip + limit * 4, limit), 240);
+
+  const [followIds, blockedUserIds, hiddenPostIds, publicAuthorIds] = await Promise.all([
+    Follow.find({ follower: userId }).distinct("following"),
+    loadBlockedUserIds(userId),
+    loadHiddenPostIds(userId),
+    User.distinct("_id", { isPrivateAccount: { $ne: true }, isSuspended: { $ne: true } }),
+  ]);
+
+  const followedAuthorIds = followIds.map(String);
+  const accessibleAuthorIds = [
+    String(userId),
+    ...followedAuthorIds,
+    ...publicAuthorIds.map(String),
+  ].filter((id) => !blockedUserIds.includes(String(id)));
+  const uniqueAccessibleAuthorIds = [...new Set(accessibleAuthorIds)];
+
+  const filter = {
+    author: { $in: uniqueAccessibleAuthorIds },
+    _id: { $nin: hiddenPostIds },
+    isHiddenByAdmin: { $ne: true },
+  };
+
+  if (normalizedSurface === "reels") {
+    filter["media.type"] = "video";
+  }
+
+  const posts = await Post.find(filter)
+    .sort({ createdAt: -1 })
+    .limit(candidateLimit)
+    .populate("author", "username fullName avatar followersCount isPrivateAccount isSuspended")
+    .lean();
+
+  const followedSet = new Set(followedAuthorIds);
+  const ranked = posts
+    .filter((post) => post.author && !post.author.isSuspended)
+    .map((post) => {
+      const creatorId = String(post.author._id || post.author);
+      const followed = followedSet.has(creatorId);
+      const self = creatorId === String(userId);
+      const engagementScore = Math.min(post.likesCount || 0, 50) * 2 + Math.min(post.commentsCount || 0, 25) * 3;
+      const ageMs = Date.now() - new Date(post.createdAt).getTime();
+      const freshnessScore = ageMs < 60 * 60 * 1000 ? 100 : ageMs < 24 * 60 * 60 * 1000 ? 50 : ageMs < 7 * 24 * 60 * 60 * 1000 ? 10 : 0;
+      const score = (self ? 1200 : 0) + (followed ? 1000 : 0) + engagementScore + freshnessScore;
+
+      return {
+        ...post,
+        recommendation: {
+          score,
+          reasons: self ? ["self", "fresh"] : followed ? ["follow_graph", "fresh"] : ["recent_public"],
+          exploration: !self && !followed,
+          candidateSources: self ? ["self"] : followed ? ["followed_creators"] : ["recent_public"],
+          mode: "db-direct",
+        },
+      };
+    })
+    .sort((left, right) => {
+      const scoreDelta = (right.recommendation?.score || 0) - (left.recommendation?.score || 0);
+      if (scoreDelta !== 0) return scoreDelta;
+      return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+    });
+
+  const selected = ranked.slice(skip, skip + limit);
+
+  return {
+    items: selected,
+    meta: buildDirectMeta(page, limit, ranked.length, normalizedSurface),
+  };
+};
+
 const pickExplorationCandidates = (ranked, limit) => {
   const target = Math.max(1, Math.round(limit * EXPLORATION_RATIO));
   const explorationPool = ranked
@@ -278,6 +386,10 @@ const computeCreatorQuality = async (creatorIds) => {
 };
 
 const getPersonalizedFeed = async (userId, query, { surface = "feed", bypassCache = false, expectedVersion = null } = {}) => {
+  if (env.recommendationMode === "db-direct" || !env.queueEnabled || !env.recommendationWorkerEnabled) {
+    return getDirectDbFeed(userId, query, { surface });
+  }
+
   const { page, limit } = getPagination(query);
   const liveVersion = await ensureUserRecommendationStateVersion(userId);
   const version = expectedVersion && Number(expectedVersion) > 0 ? Number(expectedVersion) : liveVersion;
@@ -425,5 +537,6 @@ module.exports = {
   ensureContentFeature,
   getOrCreateInterestProfile,
   getPersonalizedFeed,
+  getDirectDbFeed,
   computeCreatorQuality,
 };

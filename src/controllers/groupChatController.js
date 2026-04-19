@@ -336,6 +336,7 @@ const addGroupMembers = catchAsync(async (req, res) => {
       group: result.group,
       participantIds: result.participantIds,
       addedMemberIds: result.addedMemberIds,
+      membersCount: result.membersCount || result.group?.membersCount || result.participantIds?.length || 0,
     },
   });
 });

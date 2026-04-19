@@ -46,7 +46,7 @@ describe("Maintenance cleanup integration", () => {
       lastSeenAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000),
     });
 
-    await Session.create({
+    const revokedSession = await Session.create({
       sessionId: "revoked-session-id",
       familyId: "revoked-family-id",
       refreshJti: "revoked-refresh-jti",
@@ -56,6 +56,14 @@ describe("Maintenance cleanup integration", () => {
       isRevoked: true,
       updatedAt: new Date(Date.now() - 100 * 24 * 60 * 60 * 1000),
     });
+    await Session.updateOne(
+      { _id: revokedSession._id },
+      {
+        lastUsedAt: new Date(Date.now() - 100 * 24 * 60 * 60 * 1000),
+        updatedAt: new Date(Date.now() - 100 * 24 * 60 * 60 * 1000),
+      },
+      { timestamps: false }
+    );
 
     await PasswordResetToken.create({
       user: user._id,

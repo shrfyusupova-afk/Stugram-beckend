@@ -58,13 +58,28 @@ const loadWorkerHarness = ({
   jest.doMock("../../src/services/recommendationRefreshMetricsService", () => mocks.metrics);
   jest.doMock("../../src/queues/recommendationRefreshQueue", () => ({
     RECOMMENDATION_REFRESH_QUEUE_NAME: "recommendation-refresh",
-    recommendationQueueEnabled: queueEnabled,
+    recommendationQueueConfigured: queueEnabled,
     recommendationRefreshConnection: queueEnabled
       ? {
           duplicate: jest.fn(() => ({})),
         }
       : null,
     recommendationRefreshQueueEvents: queueEnabled ? mocks.queueEvents : null,
+    recommendationRefreshQueue: queueEnabled ? { close: jest.fn() } : null,
+    initRecommendationRefreshQueueResources: jest.fn(() => ({
+      initialized: queueEnabled,
+      ready: queueEnabled,
+    })),
+    getRecommendationRefreshConnection: jest.fn(() =>
+      queueEnabled
+        ? {
+            duplicate: jest.fn(() => ({})),
+          }
+        : null
+    ),
+    getRecommendationRefreshQueueEvents: jest.fn(() => (queueEnabled ? mocks.queueEvents : null)),
+    getRecommendationRefreshQueue: jest.fn(() => (queueEnabled ? { close: jest.fn() } : null)),
+    isRecommendationQueueReady: jest.fn(() => queueEnabled),
   }));
 
   let workerModule;

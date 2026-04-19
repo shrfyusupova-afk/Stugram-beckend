@@ -534,15 +534,19 @@ const resetPassword = async ({ token, password }, meta = {}) => {
     throw new ApiError(400, "Reset token is invalid or expired");
   }
 
-  resetRecord.user.passwordHash = await bcrypt.hash(password, 12);
+  const nextPasswordHash = await bcrypt.hash(password, 12);
+  resetRecord.user.passwordHash = nextPasswordHash;
   const now = new Date();
   resetRecord.user.tokenInvalidBefore = now;
   resetRecord.user.lastLoginAt = null;
   await resetRecord.user.save();
 
-  // If this profile belongs to an account, invalidate account tokens too.
+  // Keep the account-scoped canonical password in sync with the profile hash.
   if (resetRecord.user.accountId) {
-    await Account.findByIdAndUpdate(resetRecord.user.accountId, { tokenInvalidBefore: now });
+    await Account.findByIdAndUpdate(resetRecord.user.accountId, {
+      passwordHash: nextPasswordHash,
+      tokenInvalidBefore: now,
+    });
   }
 
   resetRecord.usedAt = new Date();

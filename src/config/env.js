@@ -72,6 +72,11 @@ const envSchema = z.object({
   REDIS_TLS_REJECT_UNAUTHORIZED: z.coerce.boolean().default(true),
   REDIS_PREFIX: z.string().default("stugram"),
   REDIS_REQUIRED: z.coerce.boolean().default(true),
+  QUEUE_ENABLED: z.coerce.boolean().default(true),
+  WORKER_REQUIRED: z.coerce.boolean().default(false),
+  RECOMMENDATION_WORKER_ENABLED: z.coerce.boolean().default(true),
+  RECOMMENDATION_MODE: z.enum(["weighted-cache", "db-direct"]).default("weighted-cache"),
+  CACHE_MODE: z.enum(["enabled", "redis-optional", "disabled"]).default("enabled"),
   ENABLE_MAINTENANCE_CLEANUP_SCHEDULER: z.coerce.boolean().default(false),
   MAINTENANCE_CLEANUP_INTERVAL_MINUTES: z.coerce.number().default(60),
   EXPIRED_STORY_RETENTION_HOURS: z.coerce.number().default(6),
@@ -97,6 +102,12 @@ const normalizedEnv = {
       : parseBooleanEnv(process.env.REDIS_REQUIRED, process.env.NODE_ENV === "production"),
   REDIS_TLS: parseBooleanEnv(process.env.REDIS_TLS, false),
   REDIS_TLS_REJECT_UNAUTHORIZED: parseBooleanEnv(process.env.REDIS_TLS_REJECT_UNAUTHORIZED, true),
+  QUEUE_ENABLED: parseBooleanEnv(process.env.QUEUE_ENABLED, true),
+  WORKER_REQUIRED: parseBooleanEnv(process.env.WORKER_REQUIRED, false),
+  RECOMMENDATION_WORKER_ENABLED: parseBooleanEnv(process.env.RECOMMENDATION_WORKER_ENABLED, true),
+  RECOMMENDATION_MODE:
+    process.env.RECOMMENDATION_MODE ||
+    (parseBooleanEnv(process.env.QUEUE_ENABLED, true) === false ? "db-direct" : "weighted-cache"),
   ALLOW_MEMORY_DB_FALLBACK: process.env.ALLOW_MEMORY_DB_FALLBACK === "true",
 };
 
@@ -346,6 +357,11 @@ const env = {
   redisConfigSource: redisConnectionDetails.redisConfigSource,
   redisPrefix: parsedEnv.REDIS_PREFIX,
   redisRequired: parsedEnv.REDIS_REQUIRED,
+  queueEnabled: parsedEnv.QUEUE_ENABLED,
+  workerRequired: parsedEnv.WORKER_REQUIRED,
+  recommendationWorkerEnabled: parsedEnv.RECOMMENDATION_WORKER_ENABLED,
+  recommendationMode: parsedEnv.RECOMMENDATION_MODE,
+  cacheMode: parsedEnv.CACHE_MODE,
   enableMaintenanceCleanupScheduler: parsedEnv.ENABLE_MAINTENANCE_CLEANUP_SCHEDULER,
   maintenanceCleanupIntervalMinutes: parsedEnv.MAINTENANCE_CLEANUP_INTERVAL_MINUTES,
   expiredStoryRetentionHours: parsedEnv.EXPIRED_STORY_RETENTION_HOURS,

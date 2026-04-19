@@ -1,6 +1,6 @@
 const ApiError = require("../utils/ApiError");
 const { getPagination } = require("../utils/pagination");
-const { uploadBufferToCloudinary } = require("../utils/media");
+const { uploadBufferToCloudinary, destroyCloudinaryAsset } = require("../utils/media");
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
 const User = require("../models/User");
@@ -8,7 +8,6 @@ const Follow = require("../models/Follow");
 const { createAuditLog } = require("./auditLogService");
 const { ensureNotBlockedBetweenUsers } = require("./chatSecurityService");
 const { validateUploadedMedia } = require("../utils/media");
-const { sendPushToUser } = require("./pushNotificationService");
 const logger = require("../utils/logger");
 
 const participantProjection = "username fullName avatar isPrivateAccount";
@@ -469,7 +468,7 @@ const getConversations = async (currentUserId, query) => {
 
   return {
     items: enrichedItems,
-    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    meta: { page, limit, total, totalPages: Math.max(Math.ceil(total / limit), 1) },
   };
 };
 
@@ -536,7 +535,7 @@ const getConversationMessages = async (currentUserId, conversationId, query) => 
 
   return {
     items: items.map((item) => formatMessage(item, currentUserId)),
-    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    meta: { page, limit, total, totalPages: Math.max(Math.ceil(total / limit), 1) },
   };
 };
 
@@ -602,29 +601,6 @@ const sendMessage = async (currentUserId, conversationId, payload) => {
     message: message._id,
   });
 
-  const recipientId = participantIds.find((participantId) => participantId !== currentUserId.toString());
-  if (recipientId) {
-    sendPushToUser(
-      recipientId,
-      {
-        title: populatedMessage.sender?.fullName || populatedMessage.sender?.username || "New message",
-        body: buildMessagePreview(message),
-        data: {
-          conversationId: conversation._id,
-          messageId: message._id,
-        },
-        notificationType: "message",
-      },
-      { notificationType: "message" }
-    ).catch((error) => {
-      logger.error("Chat push delivery failed", {
-        conversationId: conversation._id.toString(),
-        messageId: message._id.toString(),
-        error: error.message,
-      });
-    });
-  }
-
   return {
     message: formatMessage(populatedMessage, currentUserId),
     conversationId: conversation._id.toString(),
@@ -646,65 +622,51 @@ const sendMediaMessage = async (currentUserId, conversationId, payload, file) =>
   );
 
   const resolvedType = await validateUploadedMedia({ uploaded, expectedType: payload.messageType });
+  let message = null;
 
-  const message = await Message.create({
-    conversation: conversationId,
-    sender: currentUserId,
-    text: payload.text?.trim() || "",
-    messageType: resolvedType,
-    metadata: parseStructuredMetadata(payload.text),
-    replyToMessage: replyTarget?._id || null,
-    media: buildMediaPayload({ uploaded, resolvedType, file }),
-    seenBy: [currentUserId],
-    seenByRecords: [{ user: currentUserId, seenAt: new Date() }],
-  });
-
-  const preview = buildMessagePreview(message);
-  await Conversation.findByIdAndUpdate(conversationId, {
-    lastMessage: preview,
-    lastMessageAt: message.createdAt,
-  });
-
-  const populatedMessage = await populateMessageRelations(Message.findById(message._id));
-  const participantIds = conversation.participants.map((participant) => participant._id.toString());
-  await createAuditLog({
-    actor: currentUserId,
-    action: "chat.send_media_message",
-    category: "chat",
-    status: "success",
-    conversation: conversationId,
-    message: message._id,
-    details: { messageType: resolvedType },
-  });
-
-  const recipientId = participantIds.find((participantId) => participantId !== currentUserId.toString());
-  if (recipientId) {
-    sendPushToUser(
-      recipientId,
-      {
-        title: populatedMessage.sender?.fullName || populatedMessage.sender?.username || "New message",
-        body: buildMessagePreview(message),
-        data: {
-          conversationId: conversation._id,
-          messageId: message._id,
-        },
-        notificationType: "message",
-      },
-      { notificationType: "message" }
-    ).catch((error) => {
-      logger.error("Chat media push delivery failed", {
-        conversationId: conversation._id.toString(),
-        messageId: message._id.toString(),
-        error: error.message,
-      });
+  try {
+    message = await Message.create({
+      conversation: conversationId,
+      sender: currentUserId,
+      text: payload.text?.trim() || "",
+      messageType: resolvedType,
+      metadata: parseStructuredMetadata(payload.text),
+      replyToMessage: replyTarget?._id || null,
+      media: buildMediaPayload({ uploaded, resolvedType, file }),
+      seenBy: [currentUserId],
+      seenByRecords: [{ user: currentUserId, seenAt: new Date() }],
     });
-  }
 
-  return {
-    message: formatMessage(populatedMessage, currentUserId),
-    conversationId: conversation._id.toString(),
-    participantIds,
-  };
+    const preview = buildMessagePreview(message);
+    await Conversation.findByIdAndUpdate(conversationId, {
+      lastMessage: preview,
+      lastMessageAt: message.createdAt,
+    });
+
+    const populatedMessage = await populateMessageRelations(Message.findById(message._id));
+    const participantIds = conversation.participants.map((participant) => participant._id.toString());
+    await createAuditLog({
+      actor: currentUserId,
+      action: "chat.send_media_message",
+      category: "chat",
+      status: "success",
+      conversation: conversationId,
+      message: message._id,
+      details: { messageType: resolvedType },
+    });
+
+    return {
+      message: formatMessage(populatedMessage, currentUserId),
+      conversationId: conversation._id.toString(),
+      participantIds,
+    };
+  } catch (error) {
+    if (message?._id) {
+      await Message.findByIdAndDelete(message._id).catch(() => null);
+    }
+    await destroyCloudinaryAsset(uploaded.publicId, resolvedType === "file" ? "raw" : resolvedType === "image" ? "image" : "video").catch(() => null);
+    throw error;
+  }
 };
 
 const markMessageSeen = async (currentUserId, messageId) => {

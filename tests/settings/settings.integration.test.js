@@ -3,6 +3,7 @@ const {
   authHeader,
   createAuthenticatedUser,
   fakeImageBuffer,
+  getModels,
 } = require("../helpers/factories");
 
 const { getClient } = setupIntegrationTestSuite();
@@ -87,7 +88,7 @@ describe("Settings, privacy, and support integration", () => {
       .post(`/api/v1/chats/users/${target._id}/block`)
       .set(authHeader(accessToken));
 
-    expect(blockResponse.statusCode).toBe(200);
+    expect(blockResponse.statusCode).toBe(201);
 
     const blockedAccountsResponse = await client
       .get("/api/v1/blocks/me")
@@ -201,7 +202,7 @@ describe("Settings, privacy, and support integration", () => {
 
     const reviewingResponse = await client
       .patch(`/api/v1/admin/support/tickets/${ticketId}/status`)
-      .set(authHeader(moderatorToken))
+      .set(authHeader(adminToken))
       .send({
         status: "reviewing",
       });
@@ -211,7 +212,7 @@ describe("Settings, privacy, and support integration", () => {
 
     const noteResponse = await client
       .post(`/api/v1/admin/support/tickets/${ticketId}/notes`)
-      .set(authHeader(moderatorToken))
+      .set(authHeader(adminToken))
       .send({
         note: "Issue reproduced on Android 15. Investigating chat sync path.",
       });

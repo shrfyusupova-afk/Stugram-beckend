@@ -3,7 +3,7 @@ const Follow = require("../models/Follow");
 const FollowRequest = require("../models/FollowRequest");
 const User = require("../models/User");
 const { createNotification } = require("./notificationService");
-const { getPagination } = require("../utils/pagination");
+const { getPagination, buildPaginationMeta } = require("../utils/pagination");
 const { recordEvent } = require("./interactionTrackingService");
 
 const createFollowRelation = async (followerId, followingId) => {
@@ -91,7 +91,7 @@ const getFollowers = async (username, query) => {
   ]);
   return {
     items: items.map((item) => item.follower),
-    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    meta: buildPaginationMeta({ page, limit, total }),
   };
 };
 
@@ -110,7 +110,7 @@ const getFollowing = async (username, query) => {
   ]);
   return {
     items: items.map((item) => item.following),
-    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    meta: buildPaginationMeta({ page, limit, total }),
   };
 };
 
@@ -126,7 +126,7 @@ const getPendingFollowRequests = async (userId, query) => {
       .lean(),
     FollowRequest.countDocuments(filter),
   ]);
-  return { items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  return { items, meta: buildPaginationMeta({ page, limit, total }) };
 };
 
 const getPendingFollowRequestsCount = async (userId) =>

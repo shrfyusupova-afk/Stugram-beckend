@@ -2,7 +2,7 @@ const ApiError = require("../utils/ApiError");
 const Comment = require("../models/Comment");
 const Post = require("../models/Post");
 const { createNotification } = require("./notificationService");
-const { getPagination } = require("../utils/pagination");
+const { getPagination, buildPaginationMeta } = require("../utils/pagination");
 
 const addComment = async (userId, postId, payload) => {
   const post = await Post.findById(postId);
@@ -63,7 +63,7 @@ const getCommentsByPost = async (postId, query) => {
     Comment.countDocuments(filter),
   ]);
 
-  return { items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  return { items, meta: buildPaginationMeta({ page, limit, total }) };
 };
 
 const deleteComment = async (userId, commentId) => {

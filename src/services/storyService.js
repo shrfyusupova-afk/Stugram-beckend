@@ -5,7 +5,7 @@ const StoryComment = require("../models/StoryComment");
 const User = require("../models/User");
 const Follow = require("../models/Follow");
 const { destroyCloudinaryAsset, uploadBufferToCloudinary } = require("../utils/media");
-const { getPagination } = require("../utils/pagination");
+const { getPagination, buildPaginationMeta } = require("../utils/pagination");
 const chatService = require("./chatService");
 
 const userPreviewProjection = "username fullName avatar bio isPrivateAccount";
@@ -102,6 +102,7 @@ const buildOwnerInsights = async (story) => {
   return {
     totalViews: story.viewers.length,
     totalLikes: story.likesCount || 0,
+    totalComments: story.commentsCount || 0,
     totalReplies: story.repliesCount || 0,
     latestViewers,
     latestLikers,
@@ -146,24 +147,33 @@ const enrichStories = async (stories, currentUserId) => {
 const createStory = async (userId, payload, file) => {
   if (!file) throw new ApiError(400, "Story media is required");
   const uploaded = await uploadBufferToCloudinary(file.buffer, "stugram/stories", file.mimetype.startsWith("video") ? "video" : "image");
+  let story = null;
 
-  const story = await Story.create({
-    author: userId,
-    caption: payload.caption || "",
-    media: {
-      url: uploaded.url,
-      publicId: uploaded.publicId,
-      type: uploaded.resourceType === "video" ? "video" : "image",
-      width: uploaded.width,
-      height: uploaded.height,
-      duration: uploaded.duration,
-    },
-    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-  });
+  try {
+    story = await Story.create({
+      author: userId,
+      caption: payload.caption || "",
+      media: {
+        url: uploaded.url,
+        publicId: uploaded.publicId,
+        type: uploaded.resourceType === "video" ? "video" : "image",
+        width: uploaded.width,
+        height: uploaded.height,
+        duration: uploaded.duration,
+      },
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    });
 
-  const hydratedStory = await Story.findById(story._id).populate("author", userPreviewProjection);
-  const [formattedStory] = await enrichStories([hydratedStory], userId);
-  return formattedStory;
+    const hydratedStory = await Story.findById(story._id).populate("author", userPreviewProjection);
+    const [formattedStory] = await enrichStories([hydratedStory], userId);
+    return formattedStory;
+  } catch (error) {
+    if (story?._id) {
+      await Story.findByIdAndDelete(story._id).catch(() => null);
+    }
+    await destroyCloudinaryAsset(uploaded.publicId, uploaded.resourceType === "video" ? "video" : "image").catch(() => null);
+    throw error;
+  }
 };
 
 const getStoriesFeed = async (userId, query) => {
@@ -179,7 +189,7 @@ const getStoriesFeed = async (userId, query) => {
 
   return {
     items: await enrichStories(items, userId),
-    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    meta: buildPaginationMeta({ page, limit, total }),
   };
 };
 
@@ -215,7 +225,7 @@ const getStoriesOfUser = async (viewerId, username, query) => {
 
   return {
     items: await enrichStories(items, viewerId),
-    meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    meta: buildPaginationMeta({ page, limit, total }),
   };
 };
 

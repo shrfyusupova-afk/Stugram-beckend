@@ -1,5 +1,5 @@
 const Notification = require("../models/Notification");
-const { getPagination } = require("../utils/pagination");
+const { getPagination, buildPaginationMeta } = require("../utils/pagination");
 const { buildNotificationPushPayload } = require("./pushNotificationService");
 const logger = require("../utils/logger");
 
@@ -49,7 +49,7 @@ const getNotifications = async (userId, query) => {
     Notification.countDocuments({ recipient: userId }),
   ]);
 
-  return { items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  return { items, meta: buildPaginationMeta({ page, limit, total }) };
 };
 
 const markNotificationAsRead = async (userId, notificationId) =>

@@ -5,7 +5,7 @@ const { env } = require("../config/env");
 const { buildRedisClientOptions, isRedisReady, REDIS_RETRY_POLICY } = require("../config/redis");
 const logger = require("../utils/logger");
 const RECOMMENDATION_REFRESH_QUEUE_NAME = "recommendation-refresh";
-const recommendationQueueConfigured = Boolean(env.redisUrl);
+const recommendationQueueConfigured = Boolean(env.queueEnabled && env.recommendationWorkerEnabled && env.redisUrl);
 
 let recommendationRefreshConnection = null;
 let recommendationRefreshEventsConnection = null;
@@ -18,6 +18,15 @@ const getRecommendationRefreshConnection = () => recommendationRefreshConnection
 const getRecommendationRefreshEventsConnection = () => recommendationRefreshEventsConnection;
 
 const initRecommendationRefreshQueueResources = () => {
+  if (!env.queueEnabled || !env.recommendationWorkerEnabled) {
+    return {
+      initialized: false,
+      ready: false,
+      disabled: true,
+      mode: "disabled-for-closed-alpha",
+    };
+  }
+
   if (!recommendationQueueConfigured || !isRedisReady()) {
     return {
       initialized: false,

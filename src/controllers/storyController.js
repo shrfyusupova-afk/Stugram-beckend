@@ -3,6 +3,7 @@ const catchAsync = require("../utils/catchAsync");
 const storyService = require("../services/storyService");
 const { getIo } = require("../socket/socketServer");
 const { emitConversationUpdated, emitNewMessage } = require("../socket/chatSocket");
+const logger = require("../utils/logger");
 
 const createStory = catchAsync(async (req, res) => {
   const story = await storyService.createStory(req.user.id, req.body, req.file);
@@ -89,11 +90,20 @@ const getStoryReplies = catchAsync(async (req, res) => {
 
 const replyToStory = catchAsync(async (req, res) => {
   const result = await storyService.replyToStory(req.user.id, req.params.storyId, req.body);
-  const io = getIo();
 
   if (result.participantIds && result.message) {
-    emitNewMessage(io, result.participantIds, result.message);
-    await emitConversationUpdated(io, result.participantIds, result.conversationId);
+    try {
+      const io = getIo();
+      emitNewMessage(io, result.participantIds, result.message);
+      await emitConversationUpdated(io, result.participantIds, result.conversationId);
+    } catch (error) {
+      logger.warn("Story reply persisted but realtime delivery was skipped", {
+        storyId: req.params.storyId,
+        conversationId: result.conversationId,
+        errorName: error.name,
+        message: error.message,
+      });
+    }
   }
 
   sendResponse(res, {
