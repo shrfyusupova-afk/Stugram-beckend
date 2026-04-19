@@ -1,5 +1,4 @@
 const mongoose = require("mongoose");
-const { MongoMemoryServer } = require("mongodb-memory-server");
 const dns = require("dns");
 
 const { env } = require("./env");
@@ -384,6 +383,8 @@ const connectDatabase = async () => {
 
     if (env.nodeEnv !== "production" && env.allowMemoryDbFallback) {
       try {
+        const { MongoMemoryServer } = require("mongodb-memory-server");
+
         if (!memoryMongoServer) {
           memoryMongoServer = await MongoMemoryServer.create({
             instance: {
