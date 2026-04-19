@@ -2,21 +2,93 @@ require("dotenv").config();
 
 const http = require("http");
 
-const { connectDatabase, closeDatabaseConnection, getDatabaseStatus } = require("./src/config/db");
-const { env } = require("./src/config/env");
-const app = require("./src/app");
-const logger = require("./src/utils/logger");
-const { initSocketServer, closeSocketServer } = require("./src/socket/socketServer");
-const { registerChatSocket } = require("./src/socket/chatSocket");
-const { connectRedis, getRedisStatus, closeRedisConnection, isRedisReady } = require("./src/config/redis");
-const { closeRecommendationQueueResources } = require("./src/queues/recommendationRefreshQueue");
-const { isFirebaseEnabled } = require("./src/config/firebaseAdmin");
-const { isCloudinaryConfigured } = require("./src/config/cloudinary");
-const { ensureBootstrapLoginUser } = require("./src/services/bootstrapAuthService");
-const { startMaintenanceCleanupScheduler, stopMaintenanceCleanupScheduler } = require("./src/services/maintenanceService");
+const serializeError = (error) => ({
+  name: error?.name || "Error",
+  message: error?.message || String(error),
+  stack: error?.stack || null,
+  code: error?.code || null,
+  errno: error?.errno || null,
+  syscall: error?.syscall || null,
+  hostname: error?.hostname || null,
+});
+
+let connectDatabase;
+let closeDatabaseConnection;
+let getDatabaseStatus;
+let env;
+let app;
+let logger;
+let initSocketServer;
+let closeSocketServer;
+let registerChatSocket;
+let connectRedis;
+let getRedisStatus;
+let closeRedisConnection;
+let isRedisReady;
+let closeRecommendationQueueResources;
+let isFirebaseEnabled;
+let isCloudinaryConfigured;
+let ensureBootstrapLoginUser;
+let startMaintenanceCleanupScheduler;
+let stopMaintenanceCleanupScheduler;
+
+try {
+  ({ connectDatabase, closeDatabaseConnection, getDatabaseStatus } = require("./src/config/db"));
+  ({ env } = require("./src/config/env"));
+  app = require("./src/app");
+  logger = require("./src/utils/logger");
+  ({ initSocketServer, closeSocketServer } = require("./src/socket/socketServer"));
+  ({ registerChatSocket } = require("./src/socket/chatSocket"));
+  ({ connectRedis, getRedisStatus, closeRedisConnection, isRedisReady } = require("./src/config/redis"));
+  ({ closeRecommendationQueueResources } = require("./src/queues/recommendationRefreshQueue"));
+  ({ isFirebaseEnabled } = require("./src/config/firebaseAdmin"));
+  ({ isCloudinaryConfigured } = require("./src/config/cloudinary"));
+  ({ ensureBootstrapLoginUser } = require("./src/services/bootstrapAuthService"));
+  ({ startMaintenanceCleanupScheduler, stopMaintenanceCleanupScheduler } = require("./src/services/maintenanceService"));
+} catch (error) {
+  console.error(
+    JSON.stringify({
+      level: "error",
+      message: "Startup fatal error",
+      phase: "module_load",
+      ...serializeError(error),
+    })
+  );
+  process.exit(1);
+}
 
 let httpServer = null;
 let isShuttingDown = false;
+let startupPhase = "module_loaded";
+
+const PORT = Number(process.env.PORT || 10000);
+const HOST = process.env.HOST || "0.0.0.0";
+
+const setStartupPhase = (phase, extra = {}) => {
+  startupPhase = phase;
+  logger.info("Startup phase", {
+    phase,
+    ...extra,
+  });
+};
+
+const logStartupFailure = (error, phase = startupPhase) => {
+  logger.error("Startup fatal error", {
+    phase,
+    ...serializeError(error),
+  });
+};
+
+process.on("uncaughtException", (error) => {
+  logStartupFailure(error, startupPhase);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  logStartupFailure(error, startupPhase);
+  process.exit(1);
+});
 
 const logStartupSummary = () => {
   const mongo = getDatabaseStatus();
@@ -129,36 +201,92 @@ const shutdown = async (signal) => {
     process.exit(0);
   } catch (error) {
     logger.error("Graceful shutdown failed", {
-      message: error.message,
+      ...serializeError(error),
     });
     clearTimeout(forceShutdownTimer);
     process.exit(1);
   }
 };
 
+const listen = async () =>
+  new Promise((resolve, reject) => {
+    const onError = (error) => {
+      httpServer.off("listening", onListening);
+      reject(error);
+    };
+
+    const onListening = () => {
+      httpServer.off("error", onError);
+      resolve();
+    };
+
+    httpServer.once("error", onError);
+    httpServer.once("listening", onListening);
+    httpServer.listen(PORT, HOST);
+  });
+
 const startServer = async () => {
   try {
+    setStartupPhase("startup_begin", {
+      nodeEnv: env.nodeEnv,
+      nodeVersion: process.version,
+      port: PORT,
+      host: HOST,
+      renderService: Boolean(process.env.RENDER),
+    });
+
+    setStartupPhase("env_validated", {
+      port: PORT,
+      host: HOST,
+      redisRequired: env.redisRequired,
+      mongoFallbackAllowed: env.allowMemoryDbFallback,
+    });
+
+    setStartupPhase("before_connectDatabase");
     await connectDatabase();
+
+    setStartupPhase("after_connectDatabase", {
+      database: getDatabaseStatus(),
+    });
+
+    setStartupPhase("before_connectRedis");
     await connectRedis();
+
+    setStartupPhase("after_connectRedis", {
+      redis: getRedisStatus(),
+    });
+
+    setStartupPhase("before_bootstrap_user");
     const bootstrapUser = await ensureBootstrapLoginUser();
     if (!bootstrapUser) {
       logger.info("Skipping bootstrap user creation");
     }
 
+    setStartupPhase("before_create_http_server");
     httpServer = http.createServer(app);
+
+    setStartupPhase("before_socket_hooks");
     const io = initSocketServer(httpServer);
     registerChatSocket(io);
+
+    setStartupPhase("before_maintenance_hooks");
     startMaintenanceCleanupScheduler();
     logStartupSummary();
 
-    const host = process.env.HOST || "0.0.0.0";
-    httpServer.listen(env.port, host, () => {
-      logger.info(`API running on http://${host}:${env.port}`);
+    setStartupPhase("before_http_listen", {
+      port: PORT,
+      host: HOST,
     });
+
+    await listen();
+
+    setStartupPhase("after_http_listen", {
+      port: PORT,
+      host: HOST,
+    });
+    logger.info(`API running on http://${HOST}:${PORT}`);
   } catch (error) {
-    logger.error("Failed to start server", {
-      message: error.message,
-    });
+    logStartupFailure(error);
     process.exit(1);
   }
 };
