@@ -10,3 +10,25 @@ build
 coverage
 .cache
 .DS_Store
+
+# Android / Gradle
+.gradle/
+local.properties
+*/build/
+app/debug/
+app/release/
+.cxx/
+.externalNativeBuild/
+captures/
+*.iml
+
+# IDE
+.idea/
+
+# Signing keys must stay outside Git.
+*.jks
+*.keystore
+
+# Generated packages
+*.apk
+*.aab
