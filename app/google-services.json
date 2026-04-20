@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "604321601052",
+    "project_id": "stugram-urgench",
+    "storage_bucket": "stugram-urgench.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:604321601052:android:b6c597073b3a58167b31d9",
+        "android_client_info": {
+          "package_name": "com.stugram.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "604321601052-d9q8mbu2q6lgb045nj241and1etr3a6g.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCksXyrJnpMBPx5pt293b5GJ_FiodLXk7k"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "604321601052-d9q8mbu2q6lgb045nj241and1etr3a6g.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
