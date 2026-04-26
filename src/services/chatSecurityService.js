@@ -4,17 +4,46 @@ const UserReport = require("../models/UserReport");
 const Conversation = require("../models/Conversation");
 const { createAuditLog } = require("./auditLogService");
 
-const ensureNotBlockedBetweenUsers = async (firstUserId, secondUserId) => {
-  const block = await Block.findOne({
+const findInteractionBlock = async (firstUserId, secondUserId) => {
+  if (!firstUserId || !secondUserId) return null;
+  return Block.findOne({
     $or: [
       { blocker: firstUserId, blocked: secondUserId },
       { blocker: secondUserId, blocked: firstUserId },
     ],
   });
+};
+
+const ensureNotBlockedBetweenUsers = async (firstUserId, secondUserId) => {
+  const block = await findInteractionBlock(firstUserId, secondUserId);
 
   if (block) {
     throw new ApiError(403, "Blocked users cannot interact in chat");
   }
+};
+
+const areUsersBlocked = async (firstUserId, secondUserId) => Boolean(await findInteractionBlock(firstUserId, secondUserId));
+
+const loadBlockedUserIds = async (currentUserId) => {
+  if (!currentUserId) return new Set();
+
+  const blocks = await Block.find({
+    $or: [{ blocker: currentUserId }, { blocked: currentUserId }],
+  })
+    .select("blocker blocked")
+    .lean();
+
+  const blockedIds = new Set();
+  blocks.forEach((block) => {
+    if (String(block.blocker) !== String(currentUserId)) {
+      blockedIds.add(String(block.blocker));
+    }
+    if (String(block.blocked) !== String(currentUserId)) {
+      blockedIds.add(String(block.blocked));
+    }
+  });
+
+  return blockedIds;
 };
 
 const blockUser = async (currentUserId, targetUserId, meta = {}) => {
@@ -126,7 +155,10 @@ const unmuteConversation = async (currentUserId, conversationId, meta = {}) => {
 };
 
 module.exports = {
+  findInteractionBlock,
   ensureNotBlockedBetweenUsers,
+  areUsersBlocked,
+  loadBlockedUserIds,
   blockUser,
   unblockUser,
   reportUser,

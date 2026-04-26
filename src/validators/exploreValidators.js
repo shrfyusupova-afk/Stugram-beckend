@@ -4,7 +4,7 @@ const { paginationQuerySchema } = require("./commonValidators");
 
 const trendingExploreQuerySchema = {
   query: z.object({
-    limit: z.coerce.number().min(1).max(20).optional(),
+    limit: z.coerce.number().min(1).max(80).optional(),
   }),
 };
 

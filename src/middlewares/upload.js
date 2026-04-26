@@ -10,6 +10,10 @@ const imageAndVideoMimeTypes = [
   "video/mp4",
   "video/quicktime",
   "video/webm",
+  "video/x-m4v",
+  "video/3gpp",
+  "video/3gpp2",
+  "video/x-matroska",
 ];
 
 const chatUploadMimeTypes = [
@@ -63,11 +67,13 @@ const isDetectedMimeTypeCompatible = (declaredMimeType, detectedMimeType) => {
   if (declaredMimeType === detectedMimeType) return true;
 
   if (detectedMimeType === "container/mp4") {
-    return ["video/mp4", "video/quicktime", "audio/mp4", "audio/x-m4a"].includes(declaredMimeType);
+    return ["video/mp4", "video/quicktime", "video/x-m4v", "video/3gpp", "video/3gpp2", "audio/mp4", "audio/x-m4a"].includes(
+      declaredMimeType
+    );
   }
 
   if (detectedMimeType === "container/webm") {
-    return ["video/webm", "audio/webm"].includes(declaredMimeType);
+    return ["video/webm", "video/x-matroska", "audio/webm"].includes(declaredMimeType);
   }
 
   if (detectedMimeType === "application/zip") {
@@ -127,7 +133,7 @@ const createBaseUploader = (allowedMimeTypes) =>
       try {
         sanitizeFileMetadata(file);
         if (!allowedMimeTypes.includes(file.mimetype)) {
-          cb(new ApiError(400, "Unsupported file type"));
+          cb(new ApiError(400, "Unsupported file type", { receivedMimeType: file.mimetype || null }));
           return;
         }
         cb(null, true);

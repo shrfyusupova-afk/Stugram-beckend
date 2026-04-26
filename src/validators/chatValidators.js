@@ -44,6 +44,7 @@ const sendMessageSchema = {
       text: z.string().trim().max(2000).optional(),
       messageType: chatMessageTypeSchema.default("text"),
       replyToMessageId: objectIdSchema.optional(),
+      clientId: z.string().trim().max(128).regex(/^[A-Za-z0-9:_-]+$/).optional(),
       media: z
         .object({
           url: z.string().trim().url(),
@@ -92,6 +93,7 @@ const sendMediaMessageSchema = {
     text: z.string().trim().max(2000).optional(),
     messageType: z.enum(["image", "video", "voice", "round_video", "file"]),
     replyToMessageId: objectIdSchema.optional(),
+    clientId: z.string().trim().max(128).regex(/^[A-Za-z0-9:_-]+$/).optional(),
   }),
 };
 

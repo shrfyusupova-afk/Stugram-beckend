@@ -4,15 +4,36 @@ const callService = require("../services/callService");
 const Conversation = require("../models/Conversation");
 const GroupConversation = require("../models/GroupConversation");
 const User = require("../models/User");
+const { env } = require("../config/env");
 const logger = require("../utils/logger");
 const { takeSocketToken } = require("./socketRateLimit");
+const { incrementCounter } = require("../services/chatMetricsService");
 
 const joinConversationRoom = (conversationId) => `conversation:${conversationId}`;
 const joinGroupRoom = (groupId) => `group:${groupId}`;
 const joinCallRoom = (callId) => `call:${callId}`;
 const joinUserRoom = (userId) => `user:${userId}`;
+const isChatRealtimeEnabled = () => env.chatRealtimeEnabled;
+
+const recordSocketEmit = ({ eventName, userIds, targetType = null, targetId = null, payload = null }) => {
+  const event = payload?.event || null;
+  const message = payload?.message || payload || null;
+  logger.info("socket_event_emitted", {
+    eventType: eventName,
+    targetType,
+    targetId: targetId || payload?.conversationId || payload?.groupId || null,
+    sequence: event?.sequence || payload?.sequence || null,
+    messageId: message?._id || payload?.messageId || event?.messageId || null,
+    recipientCount: userIds.length,
+  });
+  incrementCounter("chat_socket_emit_total", {
+    eventType: eventName,
+    targetType: targetType || "unknown",
+  });
+};
 
 const emitConversationUpdated = async (io, userIds, conversationId) => {
+  if (!isChatRealtimeEnabled()) return;
   await Promise.all(
     userIds.map(async (userId) => {
       const conversation = await chatService.getConversationByIdForUser(userId, conversationId);
@@ -22,66 +43,91 @@ const emitConversationUpdated = async (io, userIds, conversationId) => {
 };
 
 const emitNewMessage = (io, userIds, message) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({
+    eventName: "new_message",
+    userIds,
+    targetType: "direct",
+    targetId: message?.conversation || null,
+    payload: message,
+  });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("new_message", message);
   });
 };
 
 const emitMessageSeen = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "message_seen", userIds, targetType: "direct", payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("message_seen", payload);
   });
 };
 
 const emitMessageReactionUpdated = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "message_reaction_updated", userIds, targetType: "direct", payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("message_reaction_updated", payload);
   });
 };
 
 const emitMessageDeleted = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "message_deleted", userIds, targetType: "direct", payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("message_deleted", payload);
   });
 };
 
 const emitMessageDeletedForEveryone = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "message_deleted_for_everyone", userIds, targetType: "direct", payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("message_deleted_for_everyone", payload);
   });
 };
 
 const emitMessageEdited = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "message_edited", userIds, targetType: "direct", payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("message_edited", payload);
   });
 };
 
 const emitMessageForwarded = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "message_forwarded", userIds, targetType: "direct", payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("message_forwarded", payload);
   });
 };
 
 const emitMessagePinned = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("message_pinned", payload);
   });
 };
 
 const emitMessageUnpinned = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("message_unpinned", payload);
   });
 };
 
 const emitMessageDelivered = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "message_delivered", userIds, targetType: payload?.groupId ? "group" : "direct", payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("message_delivered", payload);
   });
 };
 
 const emitGroupConversationUpdated = async (io, userIds, groupId) => {
+  if (!isChatRealtimeEnabled()) return;
   await Promise.all(
     userIds.map(async (userId) => {
       try {
@@ -96,66 +142,84 @@ const emitGroupConversationUpdated = async (io, userIds, groupId) => {
 };
 
 const emitNewGroupMessage = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "group_message", userIds, targetType: "group", targetId: payload?.groupId, payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_message", payload);
   });
 };
 
 const emitGroupMessageSeen = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "group_message_seen", userIds, targetType: "group", targetId: payload?.groupId, payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_message_seen", payload);
   });
 };
 
 const emitGroupMessageReactionUpdated = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "group_message_reaction_updated", userIds, targetType: "group", targetId: payload?.groupId, payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_message_reaction_updated", payload);
   });
 };
 
 const emitGroupMessageDeleted = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "group_message_deleted", userIds, targetType: "group", targetId: payload?.groupId, payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_message_deleted", payload);
   });
 };
 
 const emitGroupMessageDeletedForEveryone = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "group_message_deleted_for_everyone", userIds, targetType: "group", targetId: payload?.groupId, payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_message_deleted_for_everyone", payload);
   });
 };
 
 const emitGroupMessageEdited = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "group_message_edited", userIds, targetType: "group", targetId: payload?.groupId, payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_message_edited", payload);
   });
 };
 
 const emitGroupMessageForwarded = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
+  recordSocketEmit({ eventName: "group_message_forwarded", userIds, targetType: "group", targetId: payload?.groupId, payload });
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_message_forwarded", payload);
   });
 };
 
 const emitGroupMessagePinned = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_message_pinned", payload);
   });
 };
 
 const emitGroupMessageUnpinned = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_message_unpinned", payload);
   });
 };
 
 const emitGroupMemberAdded = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_member_added", payload);
   });
 };
 
 const emitGroupMemberRemoved = (io, userIds, payload) => {
+  if (!isChatRealtimeEnabled()) return;
   userIds.forEach((userId) => {
     io.to(joinUserRoom(userId)).emit("group_member_removed", payload);
   });
@@ -231,7 +295,10 @@ const emitPresence = async (io, userId, eventName) => {
 
 const registerChatSocket = (io) => {
   io.on("connection", (socket) => {
-    logger.info(`Socket connected: ${socket.user.id}`);
+    logger.info("chat_socket_connected", {
+      userId: socket.user.id,
+      socketId: socket.id,
+    });
     const presenceCount = registerUserSocket(socket.user.id.toString(), socket.id);
     if (presenceCount === 1) {
       emitPresence(io, socket.user.id.toString(), "user_online").catch(() => null);
@@ -514,7 +581,11 @@ const registerChatSocket = (io) => {
         emitPresence(io, socket.user.id.toString(), "user_offline").catch(() => null);
         await User.findByIdAndUpdate(socket.user.id, { lastSeenAt: new Date() }).catch(() => null);
       }
-      logger.info(`Socket disconnected: ${socket.user?.id || "unknown"} (${reason})`);
+      logger.info("chat_socket_disconnected", {
+        userId: socket.user?.id || "unknown",
+        socketId: socket.id,
+        reason,
+      });
     });
   });
 };

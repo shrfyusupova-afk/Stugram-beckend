@@ -37,12 +37,15 @@ const notificationSettingsSchema = {
 };
 
 const hiddenWordsSettingsSchema = {
-  body: z.object({
-    words: z.array(z.string().trim().min(1).max(HIDDEN_WORD_MAX_LENGTH)).max(HIDDEN_WORDS_MAX_COUNT).optional(),
-    hideComments: z.boolean().optional(),
-    hideMessages: z.boolean().optional(),
-    hideStoryReplies: z.boolean().optional(),
-  }),
+  body: z.preprocess(
+    (value) => (Array.isArray(value) ? { words: value } : value),
+    z.object({
+      words: z.array(z.string().trim().min(1).max(HIDDEN_WORD_MAX_LENGTH)).max(HIDDEN_WORDS_MAX_COUNT).optional(),
+      hideComments: z.boolean().optional(),
+      hideMessages: z.boolean().optional(),
+      hideStoryReplies: z.boolean().optional(),
+    })
+  ),
 };
 
 module.exports = {

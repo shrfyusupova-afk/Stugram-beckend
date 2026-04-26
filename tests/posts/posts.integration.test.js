@@ -56,6 +56,38 @@ describe("Posts and engagement integration", () => {
     expect(deleteCommentResponse.body.data.deleted).toBe(true);
   });
 
+  it("replays idempotent post comments instead of duplicating them", async () => {
+    const client = getClient();
+    const { user: author } = await createAuthenticatedUser({
+      identity: "idempotent-author@example.com",
+      username: "idempotent_author",
+    });
+    const { accessToken: viewerToken } = await createAuthenticatedUser({
+      identity: "idempotent-viewer@example.com",
+      username: "idempotent_viewer",
+    });
+
+    const post = await createPost({ authorId: author._id, caption: "Idempotent post" });
+    const idempotencyKey = "comment-once-key";
+
+    const firstResponse = await client
+      .post(`/api/v1/comments/posts/${post._id}`)
+      .set(authHeader(viewerToken))
+      .set("Idempotency-Key", idempotencyKey)
+      .send({ content: "Only once" });
+
+    const replayResponse = await client
+      .post(`/api/v1/comments/posts/${post._id}`)
+      .set(authHeader(viewerToken))
+      .set("Idempotency-Key", idempotencyKey)
+      .send({ content: "Only once" });
+
+    expect(firstResponse.statusCode).toBe(201);
+    expect(replayResponse.statusCode).toBe(201);
+    expect(replayResponse.headers["x-idempotent-replay"]).toBe("true");
+    expect(replayResponse.body.data._id).toBe(firstResponse.body.data._id);
+  });
+
   it("saves and unsaves posts and exposes liked/saved history", async () => {
     const client = getClient();
     const { user: author } = await createAuthenticatedUser({

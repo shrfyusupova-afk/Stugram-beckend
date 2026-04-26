@@ -66,6 +66,39 @@ const getProfileSummary = catchAsync(async (req, res) => {
   });
 });
 
+const getProfileHighlights = catchAsync(async (req, res) => {
+  const result = await profileService.getProfileHighlights(req.user?.id, req.params.username);
+  sendResponse(res, {
+    message: "Profile highlights fetched successfully",
+    data: result,
+  });
+});
+
+const createProfileHighlight = catchAsync(async (req, res) => {
+  const result = await profileService.createProfileHighlight(req.user.id, req.body);
+  sendResponse(res, {
+    statusCode: 201,
+    message: "Profile highlight created successfully",
+    data: result,
+  });
+});
+
+const renameProfileHighlight = catchAsync(async (req, res) => {
+  const result = await profileService.renameProfileHighlight(req.user.id, req.params.highlightId, req.body.title);
+  sendResponse(res, {
+    message: "Profile highlight updated successfully",
+    data: result,
+  });
+});
+
+const deleteProfileHighlight = catchAsync(async (req, res) => {
+  const result = await profileService.deleteProfileHighlight(req.user.id, req.params.highlightId);
+  sendResponse(res, {
+    message: "Profile highlight deleted successfully",
+    data: result,
+  });
+});
+
 const getMyProfiles = catchAsync(async (req, res) => {
   const result = await profileService.getProfilesForAccount(req.account.id);
   sendResponse(res, { message: "Profiles fetched successfully", data: result });
@@ -92,6 +125,10 @@ module.exports = {
   getProfileReels,
   getProfileTaggedPosts,
   getProfileSummary,
+  getProfileHighlights,
+  createProfileHighlight,
+  renameProfileHighlight,
+  deleteProfileHighlight,
   getMyProfiles,
   createProfile,
 };

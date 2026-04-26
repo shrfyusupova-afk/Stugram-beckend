@@ -17,6 +17,9 @@ const initSocketServer = (httpServer) => {
       origin: getSocketCorsOrigin(),
       credentials: true,
     },
+    pingInterval: 20000,
+    pingTimeout: 30000,
+    connectTimeout: 20000,
   });
 
   ioInstance.use(authenticateSocket);

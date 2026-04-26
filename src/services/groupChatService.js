@@ -5,6 +5,9 @@ const User = require("../models/User");
 const { getPagination } = require("../utils/pagination");
 const { destroyCloudinaryAsset, uploadBufferToCloudinary, validateUploadedMedia } = require("../utils/media");
 const { createAuditLog } = require("./auditLogService");
+const { recordChatEvent, listChatEvents } = require("./chatEventService");
+const logger = require("../utils/logger");
+const { incrementCounter } = require("./chatMetricsService");
 
 const participantProjection = "username fullName avatar isPrivateAccount";
 const senderProjection = "username fullName avatar";
@@ -12,6 +15,34 @@ const SHARE_PREFIX = "[[stugram-share:";
 const SHARE_SUFFIX = "]]";
 const SUPPORTED_SHARE_KINDS = new Set(["POST", "REEL", "MUSIC", "FILE", "LOCATION"]);
 const escapeRegex = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const isDuplicateKeyError = (error) => error?.code === 11000;
+
+const attachSequence = (message, sequence) => ({
+  ...message,
+  serverSequence: sequence,
+});
+
+const buildGroupTrace = ({
+  targetId,
+  currentUserId,
+  clientId = null,
+  messageId = null,
+  sequence = null,
+  eventType = null,
+  httpStatus = null,
+  errorCode = null,
+}) => ({
+  targetType: "group",
+  targetId: targetId?.toString?.() || targetId || null,
+  userId: currentUserId?.toString?.() || currentUserId || null,
+  clientId,
+  messageId: messageId?.toString?.() || messageId || null,
+  sequence,
+  eventType,
+  httpStatus,
+  errorCode,
+});
 
 const parseStructuredMetadata = (text = "") => {
   const trimmed = String(text || "").trim();
@@ -150,6 +181,7 @@ const formatGroupMessage = (message, currentUserId) => ({
   _id: message._id,
   conversation: message.groupConversation,
   sender: message.sender,
+  clientId: message.clientId || null,
   text: message.text,
   messageType: message.messageType,
   media: message.media,
@@ -220,10 +252,24 @@ const populateGroup = (query) =>
 
 const ensureGroupMember = async (groupId, currentUserId) => {
   const group = await populateGroup(GroupConversation.findById(groupId));
-  if (!group) throw new ApiError(404, "Group chat not found");
+  if (!group) {
+    logger.warn("group_membership_denied", buildGroupTrace({
+      targetId: groupId,
+      currentUserId,
+      httpStatus: 404,
+      errorCode: "GROUP_NOT_FOUND",
+    }));
+    throw new ApiError(404, "Group chat not found");
+  }
 
   const isMember = group.members.some((member) => member.user._id.toString() === currentUserId.toString());
   if (!isMember) {
+    logger.warn("group_membership_denied", buildGroupTrace({
+      targetId: groupId,
+      currentUserId,
+      httpStatus: 403,
+      errorCode: "GROUP_ACCESS_DENIED",
+    }));
     throw new ApiError(403, "Only group members can access this group chat");
   }
 
@@ -529,7 +575,72 @@ const searchGroupMessages = async (currentUserId, groupId, query = {}) => {
   };
 };
 
+const getGroupEvents = async (currentUserId, groupId, query = {}) => {
+  if (!groupId) throw new ApiError(400, "groupId is required");
+  const group = await ensureGroupMember(groupId, currentUserId);
+  logger.info("replay_events_requested", {
+    ...buildGroupTrace({
+      targetId: group._id,
+      currentUserId,
+      eventType: "replay.fetch",
+    }),
+    after: query.after || 0,
+    limit: query.limit || null,
+  });
+  const result = await listChatEvents({
+    targetType: "group",
+    targetId: group._id,
+    after: query.after,
+    limit: query.limit,
+  });
+  logger.info("replay_events_returned", {
+    ...buildGroupTrace({
+      targetId: group._id,
+      currentUserId,
+      eventType: "replay.fetch",
+      sequence: result.toSequence,
+    }),
+    fromSequence: result.fromSequence,
+    toSequence: result.toSequence,
+    eventCount: result.events.length,
+    hasMore: result.hasMore,
+  });
+  return result;
+};
+
 const createMessageRecord = async ({ currentUserId, group, payload, file = null }) => {
+  const memberIds = group.members.map((member) => member.user._id.toString());
+  logger.info("message_create_attempt", buildGroupTrace({
+    targetId: group._id,
+    currentUserId,
+    clientId: payload.clientId || null,
+    eventType: "message.created",
+  }));
+  incrementCounter("chat_send_attempt_total", { targetType: "group", hasMedia: file ? "true" : "false" });
+  const findExistingClientMessage = () => {
+    if (!payload.clientId) return null;
+    return populateMessageRelations(
+      GroupMessage.findOne({ groupConversation: group._id, sender: currentUserId, clientId: payload.clientId })
+    );
+  };
+  if (payload.clientId) {
+    const existing = await findExistingClientMessage();
+    if (existing) {
+      logger.info("message_duplicate_clientid_resolved", buildGroupTrace({
+        targetId: group._id,
+        currentUserId,
+        clientId: payload.clientId,
+        messageId: existing._id,
+        eventType: "message.created",
+      }));
+      incrementCounter("chat_duplicate_resolved_total", { targetType: "group", stage: "prefind" });
+      return {
+        message: formatGroupMessage(existing, currentUserId),
+        groupId: group._id.toString(),
+        participantIds: memberIds,
+      };
+    }
+  }
   const replyTarget = await resolveReplyTarget(currentUserId, group._id, payload.replyToMessageId);
 
   if (!file && !payload.text?.trim()) {
@@ -554,12 +665,12 @@ const createMessageRecord = async ({ currentUserId, group, payload, file = null 
     media = buildMediaPayload({ uploaded, resolvedType, file });
   }
 
-  const memberIds = group.members.map((member) => member.user._id.toString());
   let message = null;
   try {
     message = await GroupMessage.create({
       groupConversation: group._id,
       sender: currentUserId,
+      clientId: payload.clientId || null,
       text: payload.text?.trim() || "",
       messageType,
       media,
@@ -575,16 +686,68 @@ const createMessageRecord = async ({ currentUserId, group, payload, file = null 
       lastMessageAt: message.createdAt,
     });
   } catch (error) {
+    if (isDuplicateKeyError(error) && payload.clientId) {
+      const existing = await findExistingClientMessage();
+      if (existing) {
+        // The unique idempotency index is the final guard against concurrent
+        // retries. Return the already-created row with the normal success shape
+        // rather than surfacing E11000 as a failed send.
+        if (media?.publicId) {
+          await destroyCloudinaryAsset(media.publicId, messageType === "file" ? "raw" : messageType === "image" ? "image" : "video").catch(() => null);
+        }
+        logger.info("message_duplicate_clientid_resolved", buildGroupTrace({
+          targetId: group._id,
+          currentUserId,
+          clientId: payload.clientId,
+          messageId: existing._id,
+          eventType: "message.created",
+          httpStatus: 201,
+        }));
+        incrementCounter("chat_duplicate_resolved_total", { targetType: "group", stage: "create" });
+        return {
+          message: formatGroupMessage(existing, currentUserId),
+          groupId: group._id.toString(),
+          participantIds: memberIds,
+        };
+      }
+    }
     if (message?._id) {
       await GroupMessage.findByIdAndDelete(message._id).catch(() => null);
     }
     if (media?.publicId) {
       await destroyCloudinaryAsset(media.publicId, messageType === "file" ? "raw" : messageType === "image" ? "image" : "video").catch(() => null);
     }
+    logger.error("message_create_failed", {
+      ...buildGroupTrace({
+        targetId: group._id,
+        currentUserId,
+        clientId: payload.clientId || null,
+        eventType: "message.created",
+        errorCode: error.code || error.name || "GROUP_MESSAGE_CREATE_FAILED",
+      }),
+      detail: error.message,
+    });
+    incrementCounter("chat_send_failed_terminal_total", { targetType: "group", reason: "create_exception" });
+    if (file) {
+      incrementCounter("chat_media_upload_failure_total", { targetType: "group" });
+    }
     throw error;
   }
 
   const populatedMessage = await populateMessageRelations(GroupMessage.findById(message._id));
+  const formattedMessage = formatGroupMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "group",
+    targetId: group._id,
+    type: "message.created",
+    messageId: message._id,
+    clientId: payload.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
+  const sequencedMessage = attachSequence(formattedMessage, event.sequence);
 
   await createAuditLog({
     actor: currentUserId,
@@ -594,11 +757,22 @@ const createMessageRecord = async ({ currentUserId, group, payload, file = null 
     message: message._id,
     details: { groupId: group._id.toString(), messageType },
   });
+  logger.info("message_create_success", buildGroupTrace({
+    targetId: group._id,
+    currentUserId,
+    clientId: payload.clientId || null,
+    messageId: message._id,
+    sequence: event.sequence,
+    eventType: "message.created",
+    httpStatus: 201,
+  }));
+  incrementCounter("chat_send_success_total", { targetType: "group", hasMedia: file ? "true" : "false" });
 
   return {
-    message: formatGroupMessage(populatedMessage, currentUserId),
+    message: sequencedMessage,
     groupId: group._id.toString(),
     participantIds: memberIds,
+    event,
   };
 };
 
@@ -640,12 +814,37 @@ const updateGroupMessageReaction = async (currentUserId, groupId, messageId, emo
   });
 
   const populatedMessage = await populateMessageRelations(GroupMessage.findById(messageId));
+  const formattedMessage = formatGroupMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "group",
+    targetId: group._id,
+    type: "message.reactions",
+    messageId,
+    clientId: message.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      messageId: messageId.toString(),
+      reactions: formattedMessage.reactions,
+      reactionVersion: sequence,
+      serverSequence: sequence,
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
   const participantIds = group.members.map((member) => member.user._id.toString());
+  logger.info("message_reactions_updated", buildGroupTrace({
+    targetId: group._id,
+    currentUserId,
+    clientId: message.clientId || null,
+    messageId,
+    sequence: event.sequence,
+    eventType: "message.reactions",
+  }));
 
   return {
-    message: formatGroupMessage(populatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     groupId: group._id.toString(),
     participantIds,
+    event,
   };
 };
 
@@ -666,12 +865,37 @@ const removeGroupMessageReaction = async (currentUserId, groupId, messageId) => 
   });
 
   const populatedMessage = await populateMessageRelations(GroupMessage.findById(messageId));
+  const formattedMessage = formatGroupMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "group",
+    targetId: group._id,
+    type: "message.reactions",
+    messageId,
+    clientId: message.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      messageId: messageId.toString(),
+      reactions: formattedMessage.reactions,
+      reactionVersion: sequence,
+      serverSequence: sequence,
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
   const participantIds = group.members.map((member) => member.user._id.toString());
+  logger.info("message_reactions_updated", buildGroupTrace({
+    targetId: group._id,
+    currentUserId,
+    clientId: message.clientId || null,
+    messageId,
+    sequence: event.sequence,
+    eventType: "message.reactions",
+  }));
 
   return {
-    message: formatGroupMessage(populatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     groupId: group._id.toString(),
     participantIds,
+    event,
   };
 };
 
@@ -680,7 +904,8 @@ const deleteGroupMessage = async (currentUserId, groupId, messageId, scope = "se
   const message = await GroupMessage.findOne({ _id: messageId, groupConversation: groupId });
   if (!message) throw new ApiError(404, "Group message not found");
 
-  if (message.sender.toString() !== currentUserId.toString()) {
+  const senderId = (message.sender?._id || message.sender).toString();
+  if (senderId !== currentUserId.toString()) {
     throw new ApiError(403, "You can delete only your own messages");
   }
 
@@ -695,6 +920,23 @@ const deleteGroupMessage = async (currentUserId, groupId, messageId, scope = "se
     await GroupMessage.findByIdAndUpdate(messageId, { $addToSet: { deletedFor: currentUserId } }, { new: true });
   }
   const updatedMessage = await populateMessageRelations(GroupMessage.findById(messageId));
+  const formattedMessage = formatGroupMessage(updatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "group",
+    targetId: group._id,
+    type: "message.deleted",
+    messageId,
+    clientId: message.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      messageId: messageId.toString(),
+      deletedAt: formattedMessage.deletedForEveryoneAt || new Date().toISOString(),
+      deleteForEveryone,
+      deleteVersion: sequence,
+      serverSequence: sequence,
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
   await createAuditLog({
     actor: currentUserId,
     action: "group_chat.delete_message",
@@ -703,14 +945,23 @@ const deleteGroupMessage = async (currentUserId, groupId, messageId, scope = "se
     conversation: groupId,
     message: messageId,
   });
+  logger.info("message_delete_success", buildGroupTrace({
+    targetId: group._id,
+    currentUserId,
+    clientId: message.clientId || null,
+    messageId,
+    sequence: event.sequence,
+    eventType: "message.deleted",
+  }));
 
   return {
     deleted: true,
     deletedForEveryone: deleteForEveryone,
     deletedAt: new Date().toISOString(),
-    message: formatGroupMessage(updatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     groupId: group._id.toString(),
     participantIds: group.members.map((member) => member.user._id.toString()),
+    event,
   };
 };
 
@@ -718,7 +969,8 @@ const editGroupMessage = async (currentUserId, groupId, messageId, payload) => {
   const group = await ensureGroupMember(groupId, currentUserId);
   const message = await populateMessageRelations(GroupMessage.findOne({ _id: messageId, groupConversation: groupId }));
   if (!message) throw new ApiError(404, "Group message not found");
-  if (message.sender.toString() !== currentUserId.toString()) {
+  const senderId = (message.sender?._id || message.sender).toString();
+  if (senderId !== currentUserId.toString()) {
     throw new ApiError(403, "You can edit only your own messages");
   }
   if (message.messageType !== "text") {
@@ -735,6 +987,23 @@ const editGroupMessage = async (currentUserId, groupId, messageId, payload) => {
   await message.save();
 
   const populatedMessage = await populateMessageRelations(GroupMessage.findById(message._id));
+  const formattedMessage = formatGroupMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "group",
+    targetId: group._id,
+    type: "message.edited",
+    messageId: message._id,
+    clientId: message.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      messageId: message._id.toString(),
+      text: formattedMessage.text,
+      editedAt: formattedMessage.editedAt,
+      editVersion: sequence,
+      serverSequence: sequence,
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
   const participantIds = group.members.map((member) => member.user._id.toString());
 
   await createAuditLog({
@@ -745,11 +1014,20 @@ const editGroupMessage = async (currentUserId, groupId, messageId, payload) => {
     conversation: groupId,
     message: messageId,
   });
+  logger.info("message_edit_success", buildGroupTrace({
+    targetId: group._id,
+    currentUserId,
+    clientId: message.clientId || null,
+    messageId,
+    sequence: event.sequence,
+    eventType: "message.edited",
+  }));
 
   return {
-    message: formatGroupMessage(populatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     groupId: group._id.toString(),
     participantIds,
+    event,
   };
 };
 
@@ -791,6 +1069,18 @@ const forwardGroupMessage = async (currentUserId, groupId, payload) => {
   });
 
   const populatedMessage = await populateMessageRelations(GroupMessage.findById(message._id));
+  const formattedMessage = formatGroupMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "group",
+    targetId: group._id,
+    type: "message.created",
+    messageId: message._id,
+    clientId: null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
   const participantIds = group.members.map((member) => member.user._id.toString());
 
   await createAuditLog({
@@ -804,9 +1094,10 @@ const forwardGroupMessage = async (currentUserId, groupId, payload) => {
   });
 
   return {
-    message: formatGroupMessage(populatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     groupId: group._id.toString(),
     participantIds,
+    event,
   };
 };
 
@@ -986,13 +1277,39 @@ const markGroupMessageSeen = async (currentUserId, groupId, messageId) => {
     await freshMessage.save();
   }
   const populatedMessage = await populateMessageRelations(GroupMessage.findById(freshMessage._id));
+  const formattedMessage = formatGroupMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "group",
+    targetId: groupId,
+    type: "message.seen",
+    messageId: freshMessage._id,
+    clientId: freshMessage.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      messageId: freshMessage._id.toString(),
+      seenBy: formattedMessage.seenBy,
+      seenByRecords: formattedMessage.seenByRecords,
+      seenVersion: sequence,
+      serverSequence: sequence,
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
   const participantIds = await getGroupAudienceUserIds(groupId);
+  logger.info("message_seen_updated", buildGroupTrace({
+    targetId: groupId,
+    currentUserId,
+    clientId: freshMessage.clientId || null,
+    messageId: freshMessage._id,
+    sequence: event.sequence,
+    eventType: "message.seen",
+  }));
 
   return {
-    message: formatGroupMessage(populatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     groupId,
     participantIds,
     seenAt: seenAt.toISOString(),
+    event,
   };
 };
 
@@ -1003,6 +1320,7 @@ module.exports = {
   getGroupMembers,
   getGroupMessages,
   searchGroupMessages,
+  getGroupEvents,
   getGroupAudienceUserIds,
   sendGroupMessage,
   updateGroupMessageReaction,

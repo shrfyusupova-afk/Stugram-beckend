@@ -4,7 +4,13 @@ const chatController = require("../controllers/chatController");
 const { requireAuth } = require("../middlewares/auth");
 const validate = require("../middlewares/validate");
 const { uploadChatMedia } = require("../middlewares/upload");
-const { messageSendLimiter, reactionLimiter, replyLimiter } = require("../middlewares/chatSecurity");
+const {
+  messageSendLimiter,
+  reactionLimiter,
+  replyLimiter,
+  requireReplaySyncEnabled,
+  requireMediaSendEnabled,
+} = require("../middlewares/chatSecurity");
 const {
   createConversationSchema,
   conversationsListSchema,
@@ -33,6 +39,7 @@ router.get("/conversations", requireAuth, validate(conversationsListSchema), cha
 router.get("/conversations/search", requireAuth, validate(chatSearchQuerySchema), chatController.searchConversations);
 router.get("/summary", requireAuth, chatController.getSummary);
 router.get("/unread-count", requireAuth, chatController.getUnreadCount);
+router.get("/events", requireAuth, requireReplaySyncEnabled, chatController.getConversationEvents);
 router.get(
   "/conversations/:conversationId/search",
   requireAuth,
@@ -62,6 +69,7 @@ router.post(
 router.post(
   "/conversations/:conversationId/messages/media",
   requireAuth,
+  requireMediaSendEnabled,
   messageSendLimiter,
   replyLimiter,
   uploadChatMedia,

@@ -25,6 +25,19 @@ const getRequestMeta = (req) => ({
   userAgent: req.headers["user-agent"] || null,
 });
 
+const runChatAfterResponse = (task, meta = {}) => {
+  setImmediate(() => {
+    Promise.resolve()
+      .then(task)
+      .catch((error) => {
+        logger.warn("chat_post_response_realtime_failed", {
+          ...meta,
+          error: error.message,
+        });
+      });
+  });
+};
+
 const sendDeliverySignals = async ({ io, message, participantIds, conversationId, senderId, senderName }) => {
   const recipientIds = participantIds.filter((participantId) => participantId !== senderId.toString());
   if (!recipientIds.length) return;
@@ -143,20 +156,43 @@ const searchConversationMessages = catchAsync(async (req, res) => {
   });
 });
 
+const getConversationEvents = catchAsync(async (req, res) => {
+  const result = await chatService.getConversationEvents(req.user.id, req.query.conversationId, req.query);
+  sendResponse(res, {
+    message: "Conversation events fetched successfully",
+    data: result,
+  });
+});
+
 const sendMessage = catchAsync(async (req, res) => {
   const result = await chatService.sendMessage(req.user.id, req.params.conversationId, req.body);
   const io = getIo();
 
-  emitNewMessage(io, result.participantIds, result.message);
-  await emitConversationUpdated(io, result.participantIds, result.conversationId);
-  await sendDeliverySignals({
-    io,
-    message: result.message,
-    participantIds: result.participantIds,
-    conversationId: result.conversationId,
-    senderId: req.user.id,
-    senderName: result.message.sender?.fullName || result.message.sender?.username || "New message",
-  });
+  if (result.event) {
+    emitNewMessage(io, result.participantIds, {
+      ...result.message,
+      sequence: result.event.sequence,
+      event: result.event,
+    });
+    runChatAfterResponse(
+      async () => {
+        await emitConversationUpdated(io, result.participantIds, result.conversationId);
+        await sendDeliverySignals({
+          io,
+          message: result.message,
+          participantIds: result.participantIds,
+          conversationId: result.conversationId,
+          senderId: req.user.id,
+          senderName: result.message.sender?.fullName || result.message.sender?.username || "New message",
+        });
+      },
+      {
+        conversationId: result.conversationId?.toString(),
+        messageId: result.message?._id?.toString(),
+        operation: "send_message",
+      }
+    );
+  }
 
   sendResponse(res, {
     statusCode: 201,
@@ -169,16 +205,31 @@ const sendMediaMessage = catchAsync(async (req, res) => {
   const result = await chatService.sendMediaMessage(req.user.id, req.params.conversationId, req.body, req.file);
   const io = getIo();
 
-  emitNewMessage(io, result.participantIds, result.message);
-  await emitConversationUpdated(io, result.participantIds, result.conversationId);
-  await sendDeliverySignals({
-    io,
-    message: result.message,
-    participantIds: result.participantIds,
-    conversationId: result.conversationId,
-    senderId: req.user.id,
-    senderName: result.message.sender?.fullName || result.message.sender?.username || "New message",
-  });
+  if (result.event) {
+    emitNewMessage(io, result.participantIds, {
+      ...result.message,
+      sequence: result.event.sequence,
+      event: result.event,
+    });
+    runChatAfterResponse(
+      async () => {
+        await emitConversationUpdated(io, result.participantIds, result.conversationId);
+        await sendDeliverySignals({
+          io,
+          message: result.message,
+          participantIds: result.participantIds,
+          conversationId: result.conversationId,
+          senderId: req.user.id,
+          senderName: result.message.sender?.fullName || result.message.sender?.username || "New message",
+        });
+      },
+      {
+        conversationId: result.conversationId?.toString(),
+        messageId: result.message?._id?.toString(),
+        operation: "send_media_message",
+      }
+    );
+  }
 
   sendResponse(res, {
     statusCode: 201,
@@ -197,6 +248,8 @@ const markMessageSeen = catchAsync(async (req, res) => {
     seenByUserId: req.user.id,
     seenAt: result.seenAt,
     readAt: result.message.readAt,
+    sequence: result.event?.sequence,
+    event: result.event,
   });
   await emitConversationUpdated(io, result.participantIds, result.conversationId);
 
@@ -218,6 +271,8 @@ const deleteMessage = catchAsync(async (req, res) => {
       deletedByUserId: req.user.id,
       deletedAt: result.deletedAt,
       message: result.message,
+      sequence: result.event?.sequence,
+      event: result.event,
     });
   } else {
     emitMessageDeleted(io, result.participantIds, {
@@ -225,6 +280,8 @@ const deleteMessage = catchAsync(async (req, res) => {
       messageId: req.params.messageId,
       deletedByUserId: req.user.id,
       deletedForUserId: req.user.id,
+      sequence: result.event?.sequence,
+      event: result.event,
     });
   }
   await emitConversationUpdated(io, result.participantIds, result.conversationId);
@@ -242,6 +299,8 @@ const editMessage = catchAsync(async (req, res) => {
   emitMessageEdited(io, result.participantIds, {
     conversationId: result.conversationId,
     message: result.message,
+    sequence: result.event?.sequence,
+    event: result.event,
   });
   await emitConversationUpdated(io, result.participantIds, result.conversationId);
 
@@ -255,20 +314,39 @@ const forwardMessage = catchAsync(async (req, res) => {
   const result = await chatService.forwardMessage(req.user.id, req.params.conversationId, req.body);
   const io = getIo();
 
-  emitNewMessage(io, result.participantIds, result.message);
+  if (result.event) {
+    emitNewMessage(io, result.participantIds, {
+      ...result.message,
+      sequence: result.event.sequence,
+      event: result.event,
+    });
+  }
   emitMessageForwarded(io, result.participantIds, {
     conversationId: result.conversationId,
     message: result.message,
+    sequence: result.event?.sequence,
+    event: result.event,
   });
-  await emitConversationUpdated(io, result.participantIds, result.conversationId);
-  await sendDeliverySignals({
-    io,
-    message: result.message,
-    participantIds: result.participantIds,
-    conversationId: result.conversationId,
-    senderId: req.user.id,
-    senderName: result.message.sender?.fullName || result.message.sender?.username || "New message",
-  });
+  if (result.event) {
+    runChatAfterResponse(
+      async () => {
+        await emitConversationUpdated(io, result.participantIds, result.conversationId);
+        await sendDeliverySignals({
+          io,
+          message: result.message,
+          participantIds: result.participantIds,
+          conversationId: result.conversationId,
+          senderId: req.user.id,
+          senderName: result.message.sender?.fullName || result.message.sender?.username || "New message",
+        });
+      },
+      {
+        conversationId: result.conversationId?.toString(),
+        messageId: result.message?._id?.toString(),
+        operation: "forward_message",
+      }
+    );
+  }
 
   sendResponse(res, {
     statusCode: 201,
@@ -316,6 +394,8 @@ const updateReaction = catchAsync(async (req, res) => {
   emitMessageReactionUpdated(io, result.participantIds, {
     conversationId: result.conversationId,
     message: result.message,
+    sequence: result.event?.sequence,
+    event: result.event,
   });
   await emitConversationUpdated(io, result.participantIds, result.conversationId);
 
@@ -332,6 +412,8 @@ const removeReaction = catchAsync(async (req, res) => {
   emitMessageReactionUpdated(io, result.participantIds, {
     conversationId: result.conversationId,
     message: result.message,
+    sequence: result.event?.sequence,
+    event: result.event,
   });
   await emitConversationUpdated(io, result.participantIds, result.conversationId);
 
@@ -397,6 +479,7 @@ module.exports = {
   getConversationMessages,
   getConversationById,
   searchConversationMessages,
+  getConversationEvents,
   sendMessage,
   sendMediaMessage,
   markMessageSeen,

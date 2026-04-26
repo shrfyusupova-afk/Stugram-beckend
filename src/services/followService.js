@@ -5,6 +5,14 @@ const User = require("../models/User");
 const { createNotification } = require("./notificationService");
 const { getPagination, buildPaginationMeta } = require("../utils/pagination");
 const { recordEvent } = require("./interactionTrackingService");
+const { areUsersBlocked } = require("./chatSecurityService");
+
+const canViewUserContent = async (viewerId, owner) => {
+  if (!owner.isPrivateAccount) return true;
+  if (viewerId && viewerId.toString() === owner.id.toString()) return true;
+  if (!viewerId) return false;
+  return Boolean(await Follow.findOne({ follower: viewerId, following: owner.id }));
+};
 
 const createFollowRelation = async (followerId, followingId) => {
   await Follow.create({ follower: followerId, following: followingId });
@@ -76,9 +84,15 @@ const removeFollower = async (currentUserId, followerUserId) => {
   return { updated: true, removed: true, status: "not_following" };
 };
 
-const getFollowers = async (username, query) => {
+const getFollowers = async (viewerId, username, query) => {
   const user = await User.findOne({ username: username.toLowerCase() });
   if (!user) throw new ApiError(404, "User not found");
+  if (viewerId && await areUsersBlocked(viewerId, user.id)) {
+    throw new ApiError(403, "You cannot access this profile");
+  }
+  if (!(await canViewUserContent(viewerId, user))) {
+    throw new ApiError(403, "This profile is private");
+  }
   const { page, limit, skip } = getPagination(query);
   const [items, total] = await Promise.all([
     Follow.find({ following: user.id })
@@ -95,9 +109,15 @@ const getFollowers = async (username, query) => {
   };
 };
 
-const getFollowing = async (username, query) => {
+const getFollowing = async (viewerId, username, query) => {
   const user = await User.findOne({ username: username.toLowerCase() });
   if (!user) throw new ApiError(404, "User not found");
+  if (viewerId && await areUsersBlocked(viewerId, user.id)) {
+    throw new ApiError(403, "You cannot access this profile");
+  }
+  if (!(await canViewUserContent(viewerId, user))) {
+    throw new ApiError(403, "This profile is private");
+  }
   const { page, limit, skip } = getPagination(query);
   const [items, total] = await Promise.all([
     Follow.find({ follower: user.id })

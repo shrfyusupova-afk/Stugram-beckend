@@ -44,6 +44,16 @@ const destroyCloudinaryAsset = async (publicId, resourceType = "image") => {
   return cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
 };
 
+const buildCloudinaryVideoThumbnailUrl = (publicId) => {
+  if (!publicId || !isCloudinaryConfigured()) return null;
+  return cloudinary.url(publicId, {
+    resource_type: "video",
+    secure: true,
+    format: "jpg",
+    transformation: [{ width: 720, crop: "limit", quality: "auto" }],
+  });
+};
+
 const resolveUploadedMessageType = (uploaded, expectedType) => {
   if (expectedType === "file") return "file";
   if (expectedType === "voice") return "voice";
@@ -86,6 +96,7 @@ const validateUploadedMedia = async ({ uploaded, expectedType }) => {
 module.exports = {
   uploadBufferToCloudinary,
   destroyCloudinaryAsset,
+  buildCloudinaryVideoThumbnailUrl,
   validateUploadedMedia,
   getCloudinaryDestroyType,
 };

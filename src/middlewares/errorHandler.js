@@ -2,6 +2,7 @@ const { ZodError } = require("zod");
 const multer = require("multer");
 
 const ApiError = require("../utils/ApiError");
+const { env } = require("../config/env");
 const logger = require("../utils/logger");
 
 const notFoundHandler = (req, _res, next) => {
@@ -34,7 +35,10 @@ const errorHandler = (error, req, res, _next) => {
   }
 
   if (error instanceof multer.MulterError) {
-    const message = error.code === "LIMIT_FILE_SIZE" ? "Uploaded file exceeds allowed size" : "Malformed upload payload";
+    const message =
+      error.code === "LIMIT_FILE_SIZE"
+        ? `Uploaded file exceeds allowed size (${Math.round(env.mediaMaxFileSizeBytes / 1024 / 1024)} MB max)`
+        : "Malformed upload payload";
     return res.status(400).json({
       success: false,
       message,

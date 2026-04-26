@@ -5,6 +5,7 @@ const mediaSchema = new mongoose.Schema(
     url: { type: String, required: true },
     publicId: { type: String, required: true },
     type: { type: String, enum: ["image", "video"], required: true },
+    thumbnailUrl: { type: String, default: null },
     width: { type: Number, default: null },
     height: { type: Number, default: null },
     duration: { type: Number, default: null },

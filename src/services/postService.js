@@ -7,7 +7,7 @@ const Block = require("../models/Block");
 const Comment = require("../models/Comment");
 const PostLike = require("../models/PostLike");
 const UserContentPreference = require("../models/UserContentPreference");
-const { destroyCloudinaryAsset, uploadBufferToCloudinary } = require("../utils/media");
+const { buildCloudinaryVideoThumbnailUrl, destroyCloudinaryAsset, uploadBufferToCloudinary } = require("../utils/media");
 const { getPagination, buildPaginationMeta } = require("../utils/pagination");
 
 const normalizeHashtags = (hashtags = []) =>
@@ -21,6 +21,7 @@ const mapMediaFiles = async (files, folder) =>
         url: uploaded.url,
         publicId: uploaded.publicId,
         type: uploaded.resourceType === "video" ? "video" : "image",
+        thumbnailUrl: uploaded.resourceType === "video" ? buildCloudinaryVideoThumbnailUrl(uploaded.publicId) : uploaded.url,
         width: uploaded.width,
         height: uploaded.height,
         duration: uploaded.duration,

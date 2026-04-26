@@ -74,6 +74,13 @@ const messageSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    clientId: {
+      type: String,
+      trim: true,
+      maxlength: 128,
+      default: null,
+      index: true,
+    },
     text: {
       type: String,
       default: "",
@@ -183,5 +190,9 @@ const messageSchema = new mongoose.Schema(
 messageSchema.index({ conversation: 1, createdAt: -1 });
 messageSchema.index({ conversation: 1, deletedFor: 1, createdAt: -1 });
 messageSchema.index({ "reactions.user": 1 });
+messageSchema.index(
+  { conversation: 1, sender: 1, clientId: 1 },
+  { unique: true, partialFilterExpression: { clientId: { $type: "string" } } }
+);
 
 module.exports = mongoose.model("Message", messageSchema);

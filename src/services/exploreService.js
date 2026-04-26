@@ -3,9 +3,10 @@ const User = require("../models/User");
 const { getPagination } = require("../utils/pagination");
 const profileSuggestionService = require("./profileSuggestionService");
 
-const TRENDING_POST_FETCH_LIMIT = 60;
+const TRENDING_POST_FETCH_LIMIT = 80;
 const TRENDING_DEFAULT_LIMIT = 8;
 const TRENDING_LOOKBACK_DAYS = 14;
+const TRENDING_MAX_LIMIT = 80;
 
 const creatorProjection = "_id username fullName avatar bio followersCount isPrivateAccount";
 const authorPopulateProjection = "username fullName avatar bio followersCount isPrivateAccount";
@@ -47,8 +48,9 @@ const computeTrendingScore = (post) => {
 };
 
 const getTrendingExplore = async (query = {}) => {
-  const limit = Math.min(Number(query.limit) || TRENDING_DEFAULT_LIMIT, 20);
+  const limit = Math.min(Number(query.limit) || TRENDING_DEFAULT_LIMIT, TRENDING_MAX_LIMIT);
   const since = new Date(Date.now() - TRENDING_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const fetchLimit = Math.max(TRENDING_POST_FETCH_LIMIT, limit * 3);
 
   const recentPosts = await Post.find({
     isHiddenByAdmin: false,
@@ -56,10 +58,24 @@ const getTrendingExplore = async (query = {}) => {
   })
     .populate("author", authorPopulateProjection)
     .sort({ createdAt: -1 })
-    .limit(TRENDING_POST_FETCH_LIMIT)
+    .limit(fetchLimit)
     .lean();
 
-  const visiblePosts = recentPosts
+  let sourcePosts = recentPosts;
+  if (sourcePosts.length < fetchLimit) {
+    const existingIds = sourcePosts.map((post) => post._id);
+    const olderPosts = await Post.find({
+      _id: { $nin: existingIds },
+      isHiddenByAdmin: false,
+    })
+      .populate("author", authorPopulateProjection)
+      .sort({ createdAt: -1 })
+      .limit(fetchLimit - sourcePosts.length)
+      .lean();
+    sourcePosts = sourcePosts.concat(olderPosts);
+  }
+
+  const visiblePosts = sourcePosts
     .filter((post) => post.author && !post.author.isPrivateAccount)
     .map((post) => ({
       ...post,

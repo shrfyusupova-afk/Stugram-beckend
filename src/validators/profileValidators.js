@@ -41,6 +41,26 @@ const profileFeedSchema = {
   query: paginationQuerySchema,
 };
 
+const highlightIdParamSchema = {
+  params: z.object({
+    highlightId: objectIdSchema,
+  }),
+};
+
+const createHighlightSchema = {
+  body: z.object({
+    title: z.string().trim().min(1).max(30),
+    storyIds: z.array(objectIdSchema).min(1).max(20),
+    coverStoryId: objectIdSchema.optional(),
+  }),
+};
+
+const updateHighlightSchema = {
+  body: z.object({
+    title: z.string().trim().min(1).max(30),
+  }),
+};
+
 const createProfileSchema = {
   body: z.object({
     username: z.string().trim().min(3).max(30).regex(/^[a-zA-Z0-9._]+$/),
@@ -60,5 +80,8 @@ module.exports = {
   updateProfileSchema,
   userIdParamSchema,
   profileFeedSchema,
+  highlightIdParamSchema,
+  createHighlightSchema,
+  updateHighlightSchema,
   createProfileSchema,
 };

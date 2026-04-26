@@ -67,6 +67,7 @@ const groupConversationSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    latestSequence: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
 );

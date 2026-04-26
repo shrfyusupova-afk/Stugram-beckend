@@ -3,7 +3,7 @@ const catchAsync = require("../utils/catchAsync");
 const settingsService = require("../services/settingsService");
 
 const getSettings = catchAsync(async (req, res) => {
-  const settings = await settingsService.getOrCreateSettings(req.user.id);
+  const settings = await settingsService.getSettings(req.user.id);
   sendResponse(res, { message: "Settings fetched successfully", data: settings });
 });
 

@@ -1,5 +1,11 @@
 const { setupIntegrationTestSuite } = require("../helpers/integration");
-const { authHeader, createAuthenticatedUser, createPost, createUser } = require("../helpers/factories");
+const {
+  authHeader,
+  createAuthenticatedUser,
+  createFollow,
+  createPost,
+  createUser,
+} = require("../helpers/factories");
 
 const { getClient } = setupIntegrationTestSuite();
 
@@ -94,5 +100,73 @@ describe("Search integration", () => {
 
     expect(clearResponse.statusCode).toBe(200);
     expect(clearResponse.body.data.cleared).toBe(true);
+  });
+
+  it("filters blocked and private users from search and suggestions while preserving followed private access", async () => {
+    const client = getClient();
+    const { user: viewer, accessToken: viewerToken } = await createAuthenticatedUser({
+      identity: "search-viewer@example.com",
+      username: "search_viewer",
+    });
+    const { user: blockedUser } = await createAuthenticatedUser({
+      identity: "search-blocked@example.com",
+      username: "search_blocked_target",
+      fullName: "Blocked Search Target",
+    });
+    const { user: privateUser } = await createAuthenticatedUser({
+      identity: "search-private@example.com",
+      username: "search_private_target",
+      fullName: "Private Search Target",
+      isPrivateAccount: true,
+      school: "Private School",
+    });
+
+    await client
+      .post(`/api/v1/chats/users/${blockedUser._id}/block`)
+      .set(authHeader(viewerToken));
+
+    const publicSearchResponse = await client.get("/api/v1/search/users").query({ q: "search_" });
+    expect(publicSearchResponse.statusCode).toBe(200);
+    expect(publicSearchResponse.body.data.some((item) => item.username === privateUser.username)).toBe(false);
+
+    const viewerSearchResponse = await client
+      .get("/api/v1/search/users")
+      .set(authHeader(viewerToken))
+      .query({ q: "search_" });
+    expect(viewerSearchResponse.statusCode).toBe(200);
+    expect(viewerSearchResponse.body.data.some((item) => item.username === blockedUser.username)).toBe(false);
+    expect(viewerSearchResponse.body.data.some((item) => item.username === privateUser.username)).toBe(false);
+
+    await createFollow({ followerId: viewer._id, followingId: privateUser._id });
+
+    const followedPrivateSearchResponse = await client
+      .get("/api/v1/search/users")
+      .set(authHeader(viewerToken))
+      .query({ q: "search_" });
+    expect(followedPrivateSearchResponse.statusCode).toBe(200);
+    expect(followedPrivateSearchResponse.body.data.some((item) => item.username === privateUser.username)).toBe(true);
+
+    const suggestionsResponse = await client
+      .get("/api/v1/search/suggestions")
+      .set(authHeader(viewerToken))
+      .query({ q: "search_" });
+    expect(suggestionsResponse.statusCode).toBe(200);
+    expect(suggestionsResponse.body.data.users.some((item) => item.username === blockedUser.username)).toBe(false);
+  });
+
+  it("does not leak sensitive fields through public user discovery routes", async () => {
+    const client = getClient();
+    await createUser({
+      identity: "search-fields@example.com",
+      username: "search_fields_user",
+      fullName: "Search Fields User",
+    });
+
+    const response = await client.get("/api/v1/search/users").query({ q: "search_fields" });
+    expect(response.statusCode).toBe(200);
+    expect(response.body.data[0].passwordHash).toBeUndefined();
+    expect(response.body.data[0].accountId).toBeUndefined();
+    expect(response.body.data[0].googleId).toBeUndefined();
+    expect(response.body.data[0].tokenInvalidBefore).toBeUndefined();
   });
 });

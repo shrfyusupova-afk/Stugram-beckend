@@ -4,6 +4,7 @@ const storyController = require("../controllers/storyController");
 const { requireAuth } = require("../middlewares/auth");
 const validate = require("../middlewares/validate");
 const { uploadStoryMedia } = require("../middlewares/upload");
+const idempotency = require("../middlewares/idempotency");
 const {
   createStorySchema,
   storyIdParamSchema,
@@ -19,7 +20,7 @@ const {
 
 const router = express.Router();
 
-router.post("/", requireAuth, uploadStoryMedia, validate(createStorySchema), storyController.createStory);
+router.post("/", requireAuth, uploadStoryMedia, validate(createStorySchema), idempotency, storyController.createStory);
 router.get("/feed/me", requireAuth, validate(storiesFeedSchema), storyController.getStoriesFeed);
 router.get("/user/:username", validate(userStoriesSchema), storyController.getStoriesOfUser);
 router.post("/:storyId/view", requireAuth, validate(storyIdParamSchema), storyController.markStoryAsViewed);
@@ -29,10 +30,10 @@ router.get("/:storyId/insights", requireAuth, validate(storyInsightsSchema), sto
 router.post("/:storyId/like", requireAuth, validate(storyIdParamSchema), storyController.likeStory);
 router.delete("/:storyId/like", requireAuth, validate(storyIdParamSchema), storyController.unlikeStory);
 router.get("/:storyId/likes", requireAuth, validate(storyViewersSchema), storyController.getStoryLikes);
-router.post("/:storyId/comments", requireAuth, validate(storyCommentCreateSchema), storyController.addStoryComment);
+router.post("/:storyId/comments", requireAuth, validate(storyCommentCreateSchema), idempotency, storyController.addStoryComment);
 router.get("/:storyId/comments", requireAuth, validate(storyCommentsSchema), storyController.getStoryComments);
 router.get("/:storyId/replies", requireAuth, validate(storyCommentsSchema), storyController.getStoryReplies);
-router.post("/:storyId/reply", requireAuth, validate(storyReplySchema), storyController.replyToStory);
+router.post("/:storyId/reply", requireAuth, validate(storyReplySchema), idempotency, storyController.replyToStory);
 router.delete(
   "/:storyId/comments/:commentId",
   requireAuth,

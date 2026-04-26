@@ -13,12 +13,12 @@ const unfollowUser = catchAsync(async (req, res) => {
 });
 
 const getFollowers = catchAsync(async (req, res) => {
-  const result = await followService.getFollowers(req.params.username, req.query);
+  const result = await followService.getFollowers(req.user?.id || null, req.params.username, req.query);
   sendResponse(res, { message: "Followers fetched successfully", data: result.items, meta: result.meta });
 });
 
 const getFollowing = catchAsync(async (req, res) => {
-  const result = await followService.getFollowing(req.params.username, req.query);
+  const result = await followService.getFollowing(req.user?.id || null, req.params.username, req.query);
   sendResponse(res, { message: "Following fetched successfully", data: result.items, meta: result.meta });
 });
 

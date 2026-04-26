@@ -33,7 +33,12 @@ const getBlockedAccounts = async (currentUserId, query = {}) => {
           { $limit: limit },
           {
             $project: {
-              _id: 0,
+              _id: "$blockedUser._id",
+              username: "$blockedUser.username",
+              fullName: "$blockedUser.fullName",
+              avatar: "$blockedUser.avatar",
+              bio: "$blockedUser.bio",
+              isPrivateAccount: "$blockedUser.isPrivateAccount",
               blockedAt: "$createdAt",
               user: blockedUserPreviewProjection,
             },

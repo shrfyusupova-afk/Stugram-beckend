@@ -21,6 +21,7 @@ const groupChatRoutes = require("./groupChatRoutes");
 const callRoutes = require("./callRoutes");
 const adminRoutes = require("./adminRoutes");
 const recommendationRoutes = require("./recommendationRoutes");
+const highlightRoutes = require("./highlightRoutes");
 const adminPanelRoutes = require("../modules/admin/routes/adminPanelRoutes");
 const reportRoutes = require("../modules/reports/routes/reportRoutes");
 
@@ -31,6 +32,7 @@ router.use("/profiles", profileRoutes);
 router.use("/settings", settingsRoutes);
 router.use("/posts", postRoutes);
 router.use("/stories", storyRoutes);
+router.use("/highlights", highlightRoutes);
 router.use("/follows", followRoutes);
 router.use("/likes", likeRoutes);
 router.use("/comments", commentRoutes);

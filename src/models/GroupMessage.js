@@ -74,6 +74,13 @@ const groupMessageSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    clientId: {
+      type: String,
+      trim: true,
+      maxlength: 128,
+      default: null,
+      index: true,
+    },
     text: {
       type: String,
       default: "",
@@ -182,5 +189,9 @@ const groupMessageSchema = new mongoose.Schema(
 
 groupMessageSchema.index({ groupConversation: 1, createdAt: -1 });
 groupMessageSchema.index({ groupConversation: 1, deletedFor: 1, createdAt: -1 });
+groupMessageSchema.index(
+  { groupConversation: 1, sender: 1, clientId: 1 },
+  { unique: true, partialFilterExpression: { clientId: { $type: "string" } } }
+);
 
 module.exports = mongoose.model("GroupMessage", groupMessageSchema);

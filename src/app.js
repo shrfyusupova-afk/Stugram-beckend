@@ -14,8 +14,13 @@ const routes = require("./routes");
 const { getFirebaseStatus } = require("./config/firebaseAdmin");
 const { isCloudinaryConfigured } = require("./config/cloudinary");
 const recommendationRefreshService = require("./services/recommendationRefreshService");
+const { renderPrometheusMetrics, getMetricsSnapshot } = require("./services/chatMetricsService");
 
 const app = express();
+
+// Production deploys behind Render/proxies must trust exactly one proxy hop so
+// req.ip reflects X-Forwarded-For before any global rate limiter is evaluated.
+app.set("trust proxy", 1);
 
 const isClosedAlphaNoWorkerMode = () =>
   env.recommendationMode === "db-direct" && (!env.queueEnabled || !env.recommendationWorkerEnabled);
@@ -35,6 +40,14 @@ const buildRuntimeMode = (redis, queueHealth) => ({
   recommendationWorkerEnabled: env.recommendationWorkerEnabled,
   queueIntentionallyDisabled: queueHealth?.queue?.mode === "disabled-for-closed-alpha",
   cacheMode: getCacheMode(redis),
+});
+
+const buildChatControls = () => ({
+  groupSendEnabled: env.chatGroupSendEnabled,
+  mediaSendEnabled: env.chatMediaSendEnabled,
+  replaySyncEnabled: env.chatReplaySyncEnabled,
+  realtimeEnabled: env.chatRealtimeEnabled,
+  rateLimitStrictMode: env.chatRateLimitStrictMode,
 });
 
 const getQueueHealthSnapshot = async () => {
@@ -65,6 +78,24 @@ const getQueueHealthSnapshot = async () => {
   }
 };
 
+const isInternalMonitoringRequest = (req) => {
+  if (env.nodeEnv !== "production") return true;
+  const internalKey = process.env.INTERNAL_METRICS_KEY;
+  const suppliedKey = req.headers["x-internal-monitoring-key"];
+  return Boolean(internalKey && suppliedKey === internalKey);
+};
+
+const buildPublicHealthData = ({ database, redis, queueHealth, pushStatus }) => ({
+  environment: env.nodeEnv,
+  mongoConnected: Boolean(database.connected),
+  redisConnected: Boolean(redis.connected),
+  queueReady: env.workerRequired ? queueHealth?.queue?.ready === true : true,
+  cacheMode: getCacheMode(redis),
+  recommendationMode: env.recommendationMode,
+  pushEnabled: Boolean(pushStatus?.enabled),
+  cloudinaryConfigured: isCloudinaryConfigured(),
+});
+
 app.use(
   cors({
     origin: env.clientUrl,
@@ -80,13 +111,14 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(logRequestCompletion);
 
-app.get("/health", (_req, res) => {
+app.get("/health", (req, res) => {
   Promise.all([Promise.resolve(getDatabaseStatus()), Promise.resolve(getRedisStatus()), getQueueHealthSnapshot(), Promise.resolve(getFirebaseStatus())]).then(
     ([database, redis, queueHealth, pushStatus]) => {
+      const publicData = buildPublicHealthData({ database, redis, queueHealth, pushStatus });
       res.status(200).json({
         success: true,
         message: "Server is alive",
-        data: {
+        data: isInternalMonitoringRequest(req) ? {
           environment: env.nodeEnv,
           mongoConnected: database.connected,
           mongoMode: database.mode,
@@ -109,9 +141,10 @@ app.get("/health", (_req, res) => {
           recommendationWorkerEnabled: env.recommendationWorkerEnabled,
           closedAlphaNoWorker: isClosedAlphaNoWorkerMode(),
           runtimeMode: buildRuntimeMode(redis, queueHealth),
+          chatControls: buildChatControls(),
           pushEnabled: pushStatus.enabled,
           cloudinaryConfigured: isCloudinaryConfigured(),
-        },
+        } : publicData,
         meta: null,
       });
     }
@@ -129,7 +162,7 @@ app.get("/livez", (_req, res) => {
   });
 });
 
-app.get("/readyz", (_req, res) => {
+app.get("/readyz", (req, res) => {
   Promise.all([Promise.resolve(getDatabaseStatus()), Promise.resolve(getRedisStatus()), getQueueHealthSnapshot()]).then(
     ([database, redis, queueHealth]) => {
       const mongoReady =
@@ -139,11 +172,16 @@ app.get("/readyz", (_req, res) => {
       const redisReady = env.redisRequired ? isRedisReady() : true;
       const queueReady = env.workerRequired ? queueHealth?.queue?.enabled === true && queueHealth?.queue?.ready === true : true;
       const ready = mongoReady && redisReady && queueReady;
+      const pushStatus = getFirebaseStatus();
+      const publicData = {
+        ...buildPublicHealthData({ database, redis, queueHealth, pushStatus }),
+        ready,
+      };
 
       res.status(ready ? 200 : 503).json({
         success: ready,
         message: ready ? "Server is ready" : "Server is not ready",
-        data: {
+        data: isInternalMonitoringRequest(req) ? {
           environment: env.nodeEnv,
           mongoConnected: database.connected,
           mongoMode: database.mode,
@@ -166,29 +204,61 @@ app.get("/readyz", (_req, res) => {
           recommendationWorkerEnabled: env.recommendationWorkerEnabled,
           closedAlphaNoWorker: isClosedAlphaNoWorkerMode(),
           runtimeMode: buildRuntimeMode(redis, queueHealth),
-          pushEnabled: getFirebaseStatus().enabled,
+          chatControls: buildChatControls(),
+          pushEnabled: pushStatus.enabled,
           cloudinaryConfigured: isCloudinaryConfigured(),
-        },
+        } : publicData,
         meta: null,
       });
     }
   );
 });
 
-app.get("/health/push", (_req, res) => {
+app.get("/health/push", (req, res) => {
   const pushStatus = getFirebaseStatus();
   res.status(200).json({
     success: true,
     message: "Push health fetched successfully",
-    data: {
+    data: isInternalMonitoringRequest(req) ? {
       pushEnabled: pushStatus.enabled,
       reason: pushStatus.reason,
       credentialSource: pushStatus.credentialSource,
       missingFields: pushStatus.missingFields,
       projectId: pushStatus.projectId,
+    } : {
+      pushEnabled: pushStatus.enabled,
     },
     meta: null,
   });
+});
+
+app.get("/health/chat-observability", (req, res) => {
+  if (!isInternalMonitoringRequest(req)) {
+    return res.status(404).json({
+      success: false,
+      message: "Not found",
+      data: null,
+      meta: null,
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: "Chat observability metrics fetched successfully",
+    data: {
+      metrics: getMetricsSnapshot(),
+    },
+    meta: null,
+  });
+});
+
+app.get("/metrics/chat", (req, res) => {
+  if (!isInternalMonitoringRequest(req)) {
+    return res.status(404).send("Not found");
+  }
+
+  res.setHeader("Content-Type", "text/plain; version=0.0.4");
+  return res.status(200).send(renderPrometheusMetrics());
 });
 
 app.use("/api/v1", routes);

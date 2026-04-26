@@ -17,7 +17,7 @@ const searchUsersAdvanced = catchAsync(async (req, res) => {
 });
 
 const searchPosts = catchAsync(async (req, res) => {
-  const result = await searchService.searchPosts(req.query);
+  const result = await searchService.searchPosts(req.query, req.user?.id || null);
   sendResponse(res, { message: "Posts search completed", data: result.items, meta: result.meta });
 });
 
@@ -27,7 +27,7 @@ const searchHashtags = catchAsync(async (req, res) => {
 });
 
 const getSearchSuggestions = catchAsync(async (req, res) => {
-  const result = await searchService.getSearchSuggestions(req.query);
+  const result = await searchService.getSearchSuggestions(req.query, req.user?.id || null);
   sendResponse(res, {
     message: "Search suggestions fetched successfully",
     data: result,

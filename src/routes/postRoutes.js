@@ -4,6 +4,7 @@ const postController = require("../controllers/postController");
 const { requireAuth } = require("../middlewares/auth");
 const validate = require("../middlewares/validate");
 const { uploadPostMedia } = require("../middlewares/upload");
+const idempotency = require("../middlewares/idempotency");
 const {
   createPostSchema,
   updatePostSchema,
@@ -15,7 +16,7 @@ const {
 
 const router = express.Router();
 
-router.post("/", requireAuth, uploadPostMedia, validate(createPostSchema), postController.createPost);
+router.post("/", requireAuth, uploadPostMedia, validate(createPostSchema), idempotency, postController.createPost);
 router.post("/:postId/save", requireAuth, validate(postIdParamSchema), postController.savePost);
 router.patch("/:postId", requireAuth, validate(updatePostSchema), postController.updatePost);
 router.delete("/:postId/save", requireAuth, validate(postIdParamSchema), postController.unsavePost);

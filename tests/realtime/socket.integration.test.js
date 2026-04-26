@@ -105,6 +105,64 @@ describe("Realtime socket integration", () => {
     const reactionPayload = await reactionPromise;
     expect(reactionPayload.conversationId.toString()).toBe(conversation._id.toString());
     expect(reactionPayload.message.reactions[0].emoji).toBe("🔥");
+    expect(newMessagePayload.sequence).toBeDefined();
+    expect(newMessagePayload.event.sequence).toBe(newMessagePayload.sequence);
+  });
+
+  it("reconnects cleanly and receives sequenced events without duplicating delivery semantics", async () => {
+    const client = getClient();
+    const { user: firstUser, accessToken: firstToken } = await createAuthenticatedUser({
+      identity: "rt-reconnect-1@example.com",
+      username: "rt_reconnect_1",
+    });
+    const { user: secondUser, accessToken: secondToken } = await createAuthenticatedUser({
+      identity: "rt-reconnect-2@example.com",
+      username: "rt_reconnect_2",
+    });
+
+    const conversation = await createConversation({
+      participants: [firstUser._id, secondUser._id],
+      createdBy: firstUser._id,
+    });
+
+    let secondSocket = await socketHarness.connectSocket({ token: secondToken });
+    const firstSocket = await socketHarness.connectSocket({ token: firstToken });
+
+    await socketHarness.emitWithAck(firstSocket, "conversation:join", {
+      conversationId: conversation._id.toString(),
+    });
+    await socketHarness.emitWithAck(secondSocket, "conversation:join", {
+      conversationId: conversation._id.toString(),
+    });
+
+    secondSocket.close();
+    secondSocket = await socketHarness.connectSocket({ token: secondToken });
+    const secondJoinAck = await socketHarness.emitWithAck(secondSocket, "conversation:join", {
+      conversationId: conversation._id.toString(),
+    });
+    expect(secondJoinAck.ok).toBe(true);
+
+    const newMessagePromise = socketHarness.waitForEvent(secondSocket, "new_message");
+    const sendMessageResponse = await client
+      .post(`/api/v1/chats/conversations/${conversation._id}/messages`)
+      .set(authHeader(firstToken))
+      .send({ text: "reconnect hello", clientId: "rt-reconnect-client" });
+
+    expect(sendMessageResponse.statusCode).toBe(201);
+    const payload = await newMessagePromise;
+    expect(payload.clientId).toBe("rt-reconnect-client");
+    expect(payload.sequence).toBeDefined();
+    expect(payload.event.sequence).toBe(payload.sequence);
+
+    const replayResponse = await client
+      .get("/api/v1/chats/events")
+      .set(authHeader(secondToken))
+      .query({ conversationId: conversation._id.toString(), after: 0, limit: 20 });
+
+    expect(replayResponse.statusCode).toBe(200);
+    const replayEvents = replayResponse.body.data.events.filter((event) => event.clientId === "rt-reconnect-client");
+    expect(replayEvents).toHaveLength(1);
+    expect(replayEvents[0].sequence).toBe(payload.sequence);
   });
 
   it("supports group chat realtime events and membership protections", async () => {
@@ -205,6 +263,18 @@ describe("Realtime socket integration", () => {
       groupId: group._id.toString(),
     });
     expect(removedJoinAck.ok).toBe(false);
+
+    const removedSend = await client
+      .post(`/api/v1/group-chats/${group._id}/messages`)
+      .set(authHeader(memberToken))
+      .send({ text: "should fail after removal" });
+    expect(removedSend.statusCode).toBe(403);
+
+    const removedReplayResponse = await client
+      .get("/api/v1/group-chats/events")
+      .set(authHeader(memberToken))
+      .query({ groupId: group._id.toString(), after: 0, limit: 20 });
+    expect(removedReplayResponse.statusCode).toBe(403);
   });
 
   it("supports call signaling events and rejects invalid participants", async () => {

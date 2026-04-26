@@ -71,6 +71,7 @@ const sendGroupMessageSchema = {
     text: z.string().trim().max(2000).optional(),
     messageType: groupMessageTypeSchema.default("text"),
     replyToMessageId: objectIdSchema.optional(),
+    clientId: z.string().trim().max(128).regex(/^[A-Za-z0-9:_-]+$/).optional(),
   }),
 };
 

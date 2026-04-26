@@ -71,6 +71,7 @@ const conversationSchema = new mongoose.Schema(
       type: [mutedBySchema],
       default: [],
     },
+    latestSequence: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
 );

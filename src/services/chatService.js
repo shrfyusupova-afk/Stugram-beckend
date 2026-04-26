@@ -6,9 +6,11 @@ const Message = require("../models/Message");
 const User = require("../models/User");
 const Follow = require("../models/Follow");
 const { createAuditLog } = require("./auditLogService");
-const { ensureNotBlockedBetweenUsers } = require("./chatSecurityService");
+const { ensureNotBlockedBetweenUsers, loadBlockedUserIds } = require("./chatSecurityService");
 const { validateUploadedMedia } = require("../utils/media");
+const { recordChatEvent, listChatEvents } = require("./chatEventService");
 const logger = require("../utils/logger");
+const { incrementCounter } = require("./chatMetricsService");
 
 const participantProjection = "username fullName avatar isPrivateAccount";
 const senderProjection = "username fullName avatar";
@@ -70,6 +72,40 @@ const buildMediaPayload = ({ uploaded, resolvedType, file }) => ({
 });
 
 const buildConversationKey = (firstId, secondId) => [firstId.toString(), secondId.toString()].sort().join(":");
+
+const isDuplicateKeyError = (error) => error?.code === 11000;
+
+const findExistingClientMessage = (conversationId, senderId, clientId) => {
+  if (!clientId) return null;
+  return populateMessageRelations(Message.findOne({ conversation: conversationId, sender: senderId, clientId }));
+};
+
+const attachSequence = (message, sequence) => ({
+  ...message,
+  serverSequence: sequence,
+});
+
+const buildChatTrace = ({
+  targetType = "direct",
+  targetId,
+  currentUserId,
+  clientId = null,
+  messageId = null,
+  sequence = null,
+  eventType = null,
+  httpStatus = null,
+  errorCode = null,
+}) => ({
+  targetType,
+  targetId: targetId?.toString?.() || targetId || null,
+  userId: currentUserId?.toString?.() || currentUserId || null,
+  clientId,
+  messageId: messageId?.toString?.() || messageId || null,
+  sequence,
+  eventType,
+  httpStatus,
+  errorCode,
+});
 
 const buildMessagePreview = (message) => {
   if (message.isDeletedForEveryone) return "This message was deleted";
@@ -153,6 +189,7 @@ const formatMessage = (message, currentUserId) => ({
   _id: message._id,
   conversation: message.conversation,
   sender: message.sender,
+  clientId: message.clientId || null,
   text: message.text,
   messageType: message.messageType,
   media: message.media,
@@ -203,13 +240,27 @@ const ensureChatPermission = async (currentUserId, targetUserId) => {
 
 const ensureConversationParticipant = async (conversationId, currentUserId) => {
   const conversation = await Conversation.findById(conversationId).populate("participants", participantProjection);
-  if (!conversation) throw new ApiError(404, "Conversation not found");
+  if (!conversation) {
+    logger.warn("chat_access_denied", buildChatTrace({
+      targetId: conversationId,
+      currentUserId,
+      httpStatus: 404,
+      errorCode: "CONVERSATION_NOT_FOUND",
+    }));
+    throw new ApiError(404, "Conversation not found");
+  }
 
   const isParticipant = conversation.participants.some(
     (participant) => participant._id.toString() === currentUserId.toString()
   );
 
   if (!isParticipant) {
+    logger.warn("chat_access_denied", buildChatTrace({
+      targetId: conversationId,
+      currentUserId,
+      httpStatus: 403,
+      errorCode: "CONVERSATION_ACCESS_DENIED",
+    }));
     throw new ApiError(403, "Only participants can access this conversation");
   }
 
@@ -255,7 +306,8 @@ const ensureMessageBelongsToConversation = async (currentUserId, conversationId,
 };
 
 const ensureEditableMessage = (message, currentUserId) => {
-  if (message.sender.toString() !== currentUserId.toString()) {
+  const senderId = (message.sender?._id || message.sender).toString();
+  if (senderId !== currentUserId.toString()) {
     throw new ApiError(403, "You can edit only your own messages");
   }
   if (message.messageType !== "text") {
@@ -443,21 +495,28 @@ const getConversations = async (currentUserId, query) => {
   const { page, limit, skip } = getPagination(query);
   const filter = { participants: currentUserId };
 
-  const [items, total] = await Promise.all([
+  const [items, blockedIds] = await Promise.all([
     populateConversationRelations(Conversation.find(filter))
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .skip(skip)
       .limit(limit),
-    Conversation.countDocuments(filter),
+    loadBlockedUserIds(currentUserId),
   ]);
 
-  const conversationIds = items.map((conversation) => conversation._id);
+  const visibleItems = items.filter((conversation) => {
+    const otherParticipant = conversation.participants.find(
+      (participant) => participant._id.toString() !== currentUserId.toString()
+    );
+    return otherParticipant ? !blockedIds.has(otherParticipant._id.toString()) : true;
+  });
+
+  const conversationIds = visibleItems.map((conversation) => conversation._id);
   const [unreadCountMap, latestVisibleMessages] = await Promise.all([
     getConversationUnreadCounts(conversationIds, currentUserId),
     getLatestVisibleMessagesForConversations(conversationIds, currentUserId),
   ]);
 
-  const enrichedItems = items.map((conversation) =>
+  const enrichedItems = visibleItems.map((conversation) =>
     formatConversation({
       conversation,
       currentUserId,
@@ -468,7 +527,7 @@ const getConversations = async (currentUserId, query) => {
 
   return {
     items: enrichedItems,
-    meta: { page, limit, total, totalPages: Math.max(Math.ceil(total / limit), 1) },
+    meta: { page, limit, total: enrichedItems.length, totalPages: Math.max(Math.ceil(enrichedItems.length / limit), 1) },
   };
 };
 
@@ -476,8 +535,11 @@ const searchConversations = async (currentUserId, query = {}) => {
   const { page, limit, skip } = getPagination(query);
   const regex = new RegExp(escapeRegex(query.q.trim()), "i");
 
-  const conversations = await populateConversationRelations(Conversation.find({ participants: currentUserId }))
-    .sort({ lastMessageAt: -1, updatedAt: -1 });
+  const [conversations, blockedIds] = await Promise.all([
+    populateConversationRelations(Conversation.find({ participants: currentUserId }))
+      .sort({ lastMessageAt: -1, updatedAt: -1 }),
+    loadBlockedUserIds(currentUserId),
+  ]);
 
   const matchingItems = conversations.filter((conversation) => {
     const otherParticipant = conversation.participants.find(
@@ -486,6 +548,7 @@ const searchConversations = async (currentUserId, query = {}) => {
 
     return Boolean(
       otherParticipant &&
+        !blockedIds.has(otherParticipant._id.toString()) &&
         (regex.test(otherParticipant.username || "") ||
           regex.test(otherParticipant.fullName || "") ||
           regex.test(conversation.lastMessage || ""))
@@ -568,21 +631,118 @@ const searchConversationMessages = async (currentUserId, conversationId, query =
   };
 };
 
+const getConversationEvents = async (currentUserId, conversationId, query = {}) => {
+  if (!conversationId) throw new ApiError(400, "conversationId is required");
+  const conversation = await ensureConversationParticipant(conversationId, currentUserId);
+  logger.info("replay_events_requested", {
+    ...buildChatTrace({
+      targetId: conversation._id,
+      currentUserId,
+      eventType: "replay.fetch",
+    }),
+    after: query.after || 0,
+    limit: query.limit || null,
+  });
+  const result = await listChatEvents({
+    targetType: "direct",
+    targetId: conversation._id,
+    after: query.after,
+    limit: query.limit,
+  });
+  logger.info("replay_events_returned", {
+    ...buildChatTrace({
+      targetId: conversation._id,
+      currentUserId,
+      eventType: "replay.fetch",
+      sequence: result.toSequence,
+    }),
+    fromSequence: result.fromSequence,
+    toSequence: result.toSequence,
+    eventCount: result.events.length,
+    hasMore: result.hasMore,
+  });
+  return result;
+};
+
 const sendMessage = async (currentUserId, conversationId, payload) => {
   const conversation = await ensureConversationParticipant(conversationId, currentUserId);
+  logger.info("message_create_attempt", buildChatTrace({
+    targetId: conversation._id,
+    currentUserId,
+    clientId: payload.clientId || null,
+    eventType: "message.created",
+  }));
+  incrementCounter("chat_send_attempt_total", { targetType: "direct", hasMedia: "false" });
+  if (payload.clientId) {
+    const existing = await findExistingClientMessage(conversationId, currentUserId, payload.clientId);
+    if (existing) {
+      logger.info("message_duplicate_clientid_resolved", buildChatTrace({
+        targetId: conversation._id,
+        currentUserId,
+        clientId: payload.clientId,
+        messageId: existing._id,
+        eventType: "message.created",
+      }));
+      incrementCounter("chat_duplicate_resolved_total", { targetType: "direct", stage: "prefind" });
+      return {
+        message: formatMessage(existing, currentUserId),
+        conversationId: conversation._id.toString(),
+        participantIds: conversation.participants.map((participant) => participant._id.toString()),
+      };
+    }
+  }
   const replyTarget = await resolveReplyTarget(currentUserId, conversationId, payload.replyToMessageId);
 
-  const message = await Message.create({
-    conversation: conversationId,
-    sender: currentUserId,
-    text: payload.text?.trim() || "",
-    messageType: payload.messageType,
-    media: payload.media || null,
-    metadata: parseStructuredMetadata(payload.text),
-    replyToMessage: replyTarget?._id || null,
-    seenBy: [currentUserId],
-    seenByRecords: [{ user: currentUserId, seenAt: new Date() }],
-  });
+  let message;
+  try {
+    message = await Message.create({
+      conversation: conversationId,
+      sender: currentUserId,
+      clientId: payload.clientId || null,
+      text: payload.text?.trim() || "",
+      messageType: payload.messageType,
+      media: payload.media || null,
+      metadata: parseStructuredMetadata(payload.text),
+      replyToMessage: replyTarget?._id || null,
+      seenBy: [currentUserId],
+      seenByRecords: [{ user: currentUserId, seenAt: new Date() }],
+    });
+  } catch (error) {
+    // The Mongo unique idempotency index is the final race-safety layer. If a
+    // parallel retry created this clientId first, return that existing row with
+    // the normal success shape instead of surfacing E11000 to the client.
+    if (isDuplicateKeyError(error) && payload.clientId) {
+      const existing = await findExistingClientMessage(conversationId, currentUserId, payload.clientId);
+      if (existing) {
+        logger.info("message_duplicate_clientid_resolved", buildChatTrace({
+          targetId: conversation._id,
+          currentUserId,
+          clientId: payload.clientId,
+          messageId: existing._id,
+          eventType: "message.created",
+          httpStatus: 201,
+        }));
+        incrementCounter("chat_duplicate_resolved_total", { targetType: "direct", stage: "create" });
+        return {
+          message: formatMessage(existing, currentUserId),
+          conversationId: conversation._id.toString(),
+          participantIds: conversation.participants.map((participant) => participant._id.toString()),
+        };
+      }
+    }
+    logger.error("message_create_failed", {
+      ...buildChatTrace({
+        targetId: conversation._id,
+        currentUserId,
+        clientId: payload.clientId || null,
+        eventType: "message.created",
+        errorCode: error.code || error.name || "MESSAGE_CREATE_FAILED",
+      }),
+      detail: error.message,
+    });
+    incrementCounter("chat_send_failed_terminal_total", { targetType: "direct", reason: "create_exception" });
+    throw error;
+  }
 
   const preview = buildMessagePreview(message);
   await Conversation.findByIdAndUpdate(conversationId, {
@@ -591,6 +751,19 @@ const sendMessage = async (currentUserId, conversationId, payload) => {
   });
 
   const populatedMessage = await populateMessageRelations(Message.findById(message._id));
+  const formattedMessage = formatMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "direct",
+    targetId: conversation._id,
+    type: "message.created",
+    messageId: message._id,
+    clientId: payload.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
+  const sequencedMessage = attachSequence(formattedMessage, event.sequence);
   const participantIds = conversation.participants.map((participant) => participant._id.toString());
   await createAuditLog({
     actor: currentUserId,
@@ -600,11 +773,22 @@ const sendMessage = async (currentUserId, conversationId, payload) => {
     conversation: conversationId,
     message: message._id,
   });
+  logger.info("message_create_success", buildChatTrace({
+    targetId: conversation._id,
+    currentUserId,
+    clientId: payload.clientId || null,
+    messageId: message._id,
+    sequence: event.sequence,
+    eventType: "message.created",
+    httpStatus: 201,
+  }));
+  incrementCounter("chat_send_success_total", { targetType: "direct", hasMedia: "false" });
 
   return {
-    message: formatMessage(populatedMessage, currentUserId),
+    message: sequencedMessage,
     conversationId: conversation._id.toString(),
     participantIds,
+    event,
   };
 };
 
@@ -614,6 +798,31 @@ const sendMediaMessage = async (currentUserId, conversationId, payload, file) =>
   }
 
   const conversation = await ensureConversationParticipant(conversationId, currentUserId);
+  logger.info("message_create_attempt", buildChatTrace({
+    targetId: conversation._id,
+    currentUserId,
+    clientId: payload.clientId || null,
+    eventType: "message.created",
+  }));
+  incrementCounter("chat_send_attempt_total", { targetType: "direct", hasMedia: "true" });
+  if (payload.clientId) {
+    const existing = await findExistingClientMessage(conversationId, currentUserId, payload.clientId);
+    if (existing) {
+      logger.info("message_duplicate_clientid_resolved", buildChatTrace({
+        targetId: conversation._id,
+        currentUserId,
+        clientId: payload.clientId,
+        messageId: existing._id,
+        eventType: "message.created",
+      }));
+      incrementCounter("chat_duplicate_resolved_total", { targetType: "direct", stage: "prefind" });
+      return {
+        message: formatMessage(existing, currentUserId),
+        conversationId: conversation._id.toString(),
+        participantIds: conversation.participants.map((participant) => participant._id.toString()),
+      };
+    }
+  }
   const replyTarget = await resolveReplyTarget(currentUserId, conversationId, payload.replyToMessageId);
   const uploaded = await uploadBufferToCloudinary(
     file.buffer,
@@ -628,6 +837,7 @@ const sendMediaMessage = async (currentUserId, conversationId, payload, file) =>
     message = await Message.create({
       conversation: conversationId,
       sender: currentUserId,
+      clientId: payload.clientId || null,
       text: payload.text?.trim() || "",
       messageType: resolvedType,
       metadata: parseStructuredMetadata(payload.text),
@@ -644,6 +854,19 @@ const sendMediaMessage = async (currentUserId, conversationId, payload, file) =>
     });
 
     const populatedMessage = await populateMessageRelations(Message.findById(message._id));
+    const formattedMessage = formatMessage(populatedMessage, currentUserId);
+    const event = await recordChatEvent({
+      targetType: "direct",
+      targetId: conversation._id,
+      type: "message.created",
+      messageId: message._id,
+      clientId: payload.clientId || null,
+      actorId: currentUserId,
+      payload: (sequence) => ({
+        message: attachSequence(formattedMessage, sequence),
+      }),
+    });
+    const sequencedMessage = attachSequence(formattedMessage, event.sequence);
     const participantIds = conversation.participants.map((participant) => participant._id.toString());
     await createAuditLog({
       actor: currentUserId,
@@ -654,17 +877,66 @@ const sendMediaMessage = async (currentUserId, conversationId, payload, file) =>
       message: message._id,
       details: { messageType: resolvedType },
     });
+    logger.info("message_create_success", buildChatTrace({
+      targetId: conversation._id,
+      currentUserId,
+      clientId: payload.clientId || null,
+      messageId: message._id,
+      sequence: event.sequence,
+      eventType: "message.created",
+      httpStatus: 201,
+    }));
+    incrementCounter("chat_send_success_total", { targetType: "direct", hasMedia: "true" });
 
     return {
-      message: formatMessage(populatedMessage, currentUserId),
+      message: sequencedMessage,
       conversationId: conversation._id.toString(),
       participantIds,
+      event,
     };
   } catch (error) {
+    if (isDuplicateKeyError(error) && payload.clientId) {
+      const existing = await findExistingClientMessage(conversationId, currentUserId, payload.clientId);
+      if (existing) {
+        // A concurrent send won the unique-index race after this request had
+        // uploaded media. Remove this request's unused upload and return the
+        // already persisted message with the standard success shape.
+        await destroyCloudinaryAsset(
+          uploaded.publicId,
+          resolvedType === "file" ? "raw" : resolvedType === "image" ? "image" : "video"
+        ).catch(() => null);
+        logger.info("message_duplicate_clientid_resolved", buildChatTrace({
+          targetId: conversation._id,
+          currentUserId,
+          clientId: payload.clientId,
+          messageId: existing._id,
+          eventType: "message.created",
+          httpStatus: 201,
+        }));
+        incrementCounter("chat_duplicate_resolved_total", { targetType: "direct", stage: "create" });
+        return {
+          message: formatMessage(existing, currentUserId),
+          conversationId: conversation._id.toString(),
+          participantIds: conversation.participants.map((participant) => participant._id.toString()),
+        };
+      }
+    }
     if (message?._id) {
       await Message.findByIdAndDelete(message._id).catch(() => null);
     }
     await destroyCloudinaryAsset(uploaded.publicId, resolvedType === "file" ? "raw" : resolvedType === "image" ? "image" : "video").catch(() => null);
+    logger.error("message_create_failed", {
+      ...buildChatTrace({
+        targetId: conversation._id,
+        currentUserId,
+        clientId: payload.clientId || null,
+        eventType: "message.created",
+        errorCode: error.code || error.name || "MEDIA_MESSAGE_CREATE_FAILED",
+      }),
+      detail: error.message,
+    });
+    incrementCounter("chat_media_upload_failure_total", { targetType: "direct" });
+    incrementCounter("chat_send_failed_terminal_total", { targetType: "direct", reason: "media_exception" });
     throw error;
   }
 };
@@ -684,13 +956,39 @@ const markMessageSeen = async (currentUserId, messageId) => {
     await freshMessage.save();
   }
   const populatedUpdatedMessage = await populateMessageRelations(Message.findById(freshMessage._id));
+  const formattedMessage = formatMessage(populatedUpdatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "direct",
+    targetId: conversation._id,
+    type: "message.seen",
+    messageId: freshMessage._id,
+    clientId: freshMessage.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      messageId: freshMessage._id.toString(),
+      seenBy: formattedMessage.seenBy,
+      seenByRecords: formattedMessage.seenByRecords,
+      seenVersion: sequence,
+      serverSequence: sequence,
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
 
   const participantIds = conversation.participants.map((participant) => participant._id.toString());
+  logger.info("message_seen_updated", buildChatTrace({
+    targetId: conversation._id,
+    currentUserId,
+    clientId: freshMessage.clientId || null,
+    messageId: freshMessage._id,
+    sequence: event.sequence,
+    eventType: "message.seen",
+  }));
   return {
-    message: formatMessage(populatedUpdatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     participantIds,
     conversationId: conversation._id.toString(),
     seenAt: seenAt.toISOString(),
+    event,
   };
 };
 
@@ -727,12 +1025,37 @@ const updateMessageReaction = async (currentUserId, messageId, emoji) => {
     details: { emoji },
   });
   const populatedMessage = await populateMessageRelations(Message.findById(messageId));
+  const formattedMessage = formatMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "direct",
+    targetId: conversation._id,
+    type: "message.reactions",
+    messageId,
+    clientId: message.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      messageId: messageId.toString(),
+      reactions: formattedMessage.reactions,
+      reactionVersion: sequence,
+      serverSequence: sequence,
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
   const participantIds = conversation.participants.map((participant) => participant._id.toString());
+  logger.info("message_reactions_updated", buildChatTrace({
+    targetId: conversation._id,
+    currentUserId,
+    clientId: message.clientId || null,
+    messageId,
+    sequence: event.sequence,
+    eventType: "message.reactions",
+  }));
 
   return {
-    message: formatMessage(populatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     conversationId: conversation._id.toString(),
     participantIds,
+    event,
   };
 };
 
@@ -753,12 +1076,37 @@ const removeMessageReaction = async (currentUserId, messageId) => {
   });
 
   const populatedMessage = await populateMessageRelations(Message.findById(messageId));
+  const formattedMessage = formatMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "direct",
+    targetId: conversation._id,
+    type: "message.reactions",
+    messageId,
+    clientId: message.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      messageId: messageId.toString(),
+      reactions: formattedMessage.reactions,
+      reactionVersion: sequence,
+      serverSequence: sequence,
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
   const participantIds = conversation.participants.map((participant) => participant._id.toString());
+  logger.info("message_reactions_updated", buildChatTrace({
+    targetId: conversation._id,
+    currentUserId,
+    clientId: message.clientId || null,
+    messageId,
+    sequence: event.sequence,
+    eventType: "message.reactions",
+  }));
 
   return {
-    message: formatMessage(populatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     conversationId: conversation._id.toString(),
     participantIds,
+    event,
   };
 };
 
@@ -767,7 +1115,8 @@ const deleteMessage = async (currentUserId, messageId, scope = "self") => {
   if (!message) throw new ApiError(404, "Message not found");
   const conversation = await ensureConversationParticipant(message.conversation, currentUserId);
 
-  if (message.sender.toString() !== currentUserId.toString()) {
+  const senderId = (message.sender?._id || message.sender).toString();
+  if (senderId !== currentUserId.toString()) {
     throw new ApiError(403, "You can delete only your own messages");
   }
 
@@ -787,6 +1136,23 @@ const deleteMessage = async (currentUserId, messageId, scope = "self") => {
   }
 
   const updatedMessage = await populateMessageRelations(Message.findById(messageId));
+  const formattedMessage = formatMessage(updatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "direct",
+    targetId: conversation._id,
+    type: "message.deleted",
+    messageId,
+    clientId: message.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      messageId: messageId.toString(),
+      deletedAt: formattedMessage.deletedForEveryoneAt || new Date().toISOString(),
+      deleteForEveryone,
+      deleteVersion: sequence,
+      serverSequence: sequence,
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
 
   await createAuditLog({
     actor: currentUserId,
@@ -796,14 +1162,23 @@ const deleteMessage = async (currentUserId, messageId, scope = "self") => {
     conversation: message.conversation,
     message: messageId,
   });
+  logger.info("message_delete_success", buildChatTrace({
+    targetId: conversation._id,
+    currentUserId,
+    clientId: message.clientId || null,
+    messageId,
+    sequence: event.sequence,
+    eventType: "message.deleted",
+  }));
 
   return {
     deleted: true,
     deletedForEveryone: deleteForEveryone,
     deletedAt: new Date().toISOString(),
-    message: formatMessage(updatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     conversationId: conversation._id.toString(),
     participantIds: conversation.participants.map((participant) => participant._id.toString()),
+    event,
   };
 };
 
@@ -821,6 +1196,23 @@ const editMessage = async (currentUserId, messageId, payload) => {
   await message.save();
 
   const populatedMessage = await populateMessageRelations(Message.findById(message._id));
+  const formattedMessage = formatMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "direct",
+    targetId: conversation._id,
+    type: "message.edited",
+    messageId: message._id,
+    clientId: message.clientId || null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      messageId: message._id.toString(),
+      text: formattedMessage.text,
+      editedAt: formattedMessage.editedAt,
+      editVersion: sequence,
+      serverSequence: sequence,
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
   const participantIds = conversation.participants.map((participant) => participant._id.toString());
 
   await createAuditLog({
@@ -831,11 +1223,20 @@ const editMessage = async (currentUserId, messageId, payload) => {
     conversation: message.conversation,
     message: messageId,
   });
+  logger.info("message_edit_success", buildChatTrace({
+    targetId: conversation._id,
+    currentUserId,
+    clientId: message.clientId || null,
+    messageId,
+    sequence: event.sequence,
+    eventType: "message.edited",
+  }));
 
   return {
-    message: formatMessage(populatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     conversationId: conversation._id.toString(),
     participantIds,
+    event,
   };
 };
 
@@ -876,6 +1277,18 @@ const forwardMessage = async (currentUserId, conversationId, payload) => {
   });
 
   const populatedMessage = await populateMessageRelations(Message.findById(message._id));
+  const formattedMessage = formatMessage(populatedMessage, currentUserId);
+  const event = await recordChatEvent({
+    targetType: "direct",
+    targetId: conversation._id,
+    type: "message.created",
+    messageId: message._id,
+    clientId: null,
+    actorId: currentUserId,
+    payload: (sequence) => ({
+      message: attachSequence(formattedMessage, sequence),
+    }),
+  });
   const participantIds = conversation.participants.map((participant) => participant._id.toString());
 
   await createAuditLog({
@@ -889,9 +1302,10 @@ const forwardMessage = async (currentUserId, conversationId, payload) => {
   });
 
   return {
-    message: formatMessage(populatedMessage, currentUserId),
+    message: attachSequence(formattedMessage, event.sequence),
     conversationId: conversation._id.toString(),
     participantIds,
+    event,
   };
 };
 
@@ -954,6 +1368,7 @@ module.exports = {
   getTotalUnreadCount,
   getChatSummary,
   getConversationMessages,
+  getConversationEvents,
   searchConversationMessages,
   sendMessage,
   sendMediaMessage,

@@ -21,6 +21,19 @@ const {
   emitNewGroupMessage,
 } = require("../socket/chatSocket");
 
+const runGroupChatAfterResponse = (task, meta = {}) => {
+  setImmediate(() => {
+    Promise.resolve()
+      .then(task)
+      .catch((error) => {
+        logger.warn("group_chat_post_response_realtime_failed", {
+          ...meta,
+          error: error.message,
+        });
+      });
+  });
+};
+
 const sendGroupDeliverySignals = async ({ io, message, participantIds, groupId, senderId, senderName }) => {
   const recipientIds = participantIds.filter((participantId) => participantId !== senderId.toString());
   if (!recipientIds.length) return;
@@ -127,23 +140,44 @@ const searchGroupMessages = catchAsync(async (req, res) => {
   });
 });
 
+const getGroupEvents = catchAsync(async (req, res) => {
+  const result = await groupChatService.getGroupEvents(req.user.id, req.query.groupId, req.query);
+  sendResponse(res, {
+    message: "Group events fetched successfully",
+    data: result,
+  });
+});
+
 const sendGroupMessage = catchAsync(async (req, res) => {
   const result = await groupChatService.sendGroupMessage(req.user.id, req.params.groupId, req.body, req.file || null);
   const io = getIo();
 
-  emitNewGroupMessage(io, result.participantIds, {
-    groupId: result.groupId,
-    message: result.message,
-  });
-  await emitGroupConversationUpdated(io, result.participantIds, result.groupId);
-  await sendGroupDeliverySignals({
-    io,
-    message: result.message,
-    participantIds: result.participantIds,
-    groupId: result.groupId,
-    senderId: req.user.id,
-    senderName: result.message.sender?.fullName || result.message.sender?.username || "New message",
-  });
+  if (result.event) {
+    emitNewGroupMessage(io, result.participantIds, {
+      groupId: result.groupId,
+      message: result.message,
+      sequence: result.event.sequence,
+      event: result.event,
+    });
+    runGroupChatAfterResponse(
+      async () => {
+        await emitGroupConversationUpdated(io, result.participantIds, result.groupId);
+        await sendGroupDeliverySignals({
+          io,
+          message: result.message,
+          participantIds: result.participantIds,
+          groupId: result.groupId,
+          senderId: req.user.id,
+          senderName: result.message.sender?.fullName || result.message.sender?.username || "New message",
+        });
+      },
+      {
+        groupId: result.groupId?.toString(),
+        messageId: result.message?._id?.toString(),
+        operation: "send_group_message",
+      }
+    );
+  }
 
   sendResponse(res, {
     statusCode: 201,
@@ -156,23 +190,40 @@ const forwardGroupMessage = catchAsync(async (req, res) => {
   const result = await groupChatService.forwardGroupMessage(req.user.id, req.params.groupId, req.body);
   const io = getIo();
 
-  emitNewGroupMessage(io, result.participantIds, {
-    groupId: result.groupId,
-    message: result.message,
-  });
+  if (result.event) {
+    emitNewGroupMessage(io, result.participantIds, {
+      groupId: result.groupId,
+      message: result.message,
+      sequence: result.event.sequence,
+      event: result.event,
+    });
+  }
   emitGroupMessageForwarded(io, result.participantIds, {
     groupId: result.groupId,
     message: result.message,
+    sequence: result.event?.sequence,
+    event: result.event,
   });
-  await emitGroupConversationUpdated(io, result.participantIds, result.groupId);
-  await sendGroupDeliverySignals({
-    io,
-    message: result.message,
-    participantIds: result.participantIds,
-    groupId: result.groupId,
-    senderId: req.user.id,
-    senderName: result.message.sender?.fullName || result.message.sender?.username || "New message",
-  });
+  if (result.event) {
+    runGroupChatAfterResponse(
+      async () => {
+        await emitGroupConversationUpdated(io, result.participantIds, result.groupId);
+        await sendGroupDeliverySignals({
+          io,
+          message: result.message,
+          participantIds: result.participantIds,
+          groupId: result.groupId,
+          senderId: req.user.id,
+          senderName: result.message.sender?.fullName || result.message.sender?.username || "New message",
+        });
+      },
+      {
+        groupId: result.groupId?.toString(),
+        messageId: result.message?._id?.toString(),
+        operation: "forward_group_message",
+      }
+    );
+  }
 
   sendResponse(res, {
     statusCode: 201,
@@ -193,6 +244,8 @@ const updateGroupMessageReaction = catchAsync(async (req, res) => {
   emitGroupMessageReactionUpdated(io, result.participantIds, {
     groupId: result.groupId,
     message: result.message,
+    sequence: result.event?.sequence,
+    event: result.event,
   });
   await emitGroupConversationUpdated(io, result.participantIds, result.groupId);
 
@@ -217,6 +270,8 @@ const editGroupMessage = catchAsync(async (req, res) => {
   emitGroupMessageEdited(io, result.participantIds, {
     groupId: result.groupId,
     message: result.message,
+    sequence: result.event?.sequence,
+    event: result.event,
   });
   await emitGroupConversationUpdated(io, result.participantIds, result.groupId);
 
@@ -236,6 +291,8 @@ const removeGroupMessageReaction = catchAsync(async (req, res) => {
   emitGroupMessageReactionUpdated(io, result.participantIds, {
     groupId: result.groupId,
     message: result.message,
+    sequence: result.event?.sequence,
+    event: result.event,
   });
   await emitGroupConversationUpdated(io, result.participantIds, result.groupId);
 
@@ -264,6 +321,8 @@ const deleteGroupMessage = catchAsync(async (req, res) => {
       deletedByUserId: req.user.id,
       deletedAt: result.deletedAt,
       message: result.message,
+      sequence: result.event?.sequence,
+      event: result.event,
     });
   } else {
     emitGroupMessageDeleted(io, result.participantIds, {
@@ -271,6 +330,8 @@ const deleteGroupMessage = catchAsync(async (req, res) => {
       messageId: req.params.messageId,
       deletedByUserId: req.user.id,
       deletedForUserId: req.user.id,
+      sequence: result.event?.sequence,
+      event: result.event,
     });
   }
   await emitGroupConversationUpdated(io, result.participantIds, result.groupId);
@@ -404,6 +465,8 @@ const markGroupMessageSeen = catchAsync(async (req, res) => {
     seenByUserId: req.user.id,
     seenAt: result.seenAt,
     readAt: result.message.readAt,
+    sequence: result.event?.sequence,
+    event: result.event,
   });
   await emitGroupConversationUpdated(io, result.participantIds, result.groupId);
 
@@ -420,6 +483,7 @@ module.exports = {
   getGroupMembers,
   getGroupMessages,
   searchGroupMessages,
+  getGroupEvents,
   sendGroupMessage,
   forwardGroupMessage,
   updateGroupMessageReaction,

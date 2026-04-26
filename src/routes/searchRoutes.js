@@ -18,10 +18,10 @@ router.post("/history", requireAuth, validate(searchHistoryCreateSchema), search
 router.get("/history", requireAuth, validate(searchHistoryListSchema), searchController.getSearchHistory);
 router.delete("/history/:historyId", requireAuth, validate(searchHistoryIdParamSchema), searchController.deleteSearchHistoryItem);
 router.delete("/history", requireAuth, searchController.clearSearchHistory);
-router.get("/suggestions", validate(searchSuggestionsQuerySchema), searchController.getSearchSuggestions);
+router.get("/suggestions", optionalAuth, validate(searchSuggestionsQuerySchema), searchController.getSearchSuggestions);
 router.get("/users/advanced", optionalAuth, validate(advancedUserSearchQuerySchema), searchController.searchUsersAdvanced);
 router.get("/users", optionalAuth, validate(searchQuerySchema), searchController.searchUsers);
-router.get("/posts", validate(searchQuerySchema), searchController.searchPosts);
+router.get("/posts", optionalAuth, validate(searchQuerySchema), searchController.searchPosts);
 router.get("/hashtags", validate(searchQuerySchema), searchController.searchHashtags);
 
 module.exports = router;

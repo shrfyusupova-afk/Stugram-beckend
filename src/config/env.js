@@ -1,5 +1,7 @@
 const { z } = require("zod");
 
+// Production configuration is intentionally strict: Render/host env vars must
+// provide real providers/secrets, and mock OTP delivery is blocked in production.
 const parseBooleanEnv = (value, fallback = undefined) => {
   if (value === undefined || value === null || value === "") {
     return fallback;
@@ -63,7 +65,8 @@ const envSchema = z.object({
   MONGO_STARTUP_DIAGNOSTICS: z.coerce.boolean().default(true),
   MONGO_DNS_SERVERS: z.string().optional(),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(15 * 60 * 1000),
-  RATE_LIMIT_MAX: z.coerce.number().default(200),
+  RATE_LIMIT_MAX: z.coerce.number().default(500),
+  AUTHENTICATED_RATE_LIMIT_MAX: z.coerce.number().default(5000),
   REDIS_URL: z.string().optional(),
   REDIS_HOST: z.string().default("127.0.0.1"),
   REDIS_PORT: z.coerce.number().default(6379),
@@ -86,10 +89,15 @@ const envSchema = z.object({
   CLOUDINARY_CLOUD_NAME: z.string().min(1),
   CLOUDINARY_API_KEY: z.string().min(1),
   CLOUDINARY_API_SECRET: z.string().min(1),
-  MEDIA_MAX_FILE_SIZE_MB: z.coerce.number().default(25),
+  MEDIA_MAX_FILE_SIZE_MB: z.coerce.number().default(100),
   MEDIA_MAX_VIDEO_DURATION_SECONDS: z.coerce.number().default(180),
   CHAT_MAX_AUDIO_DURATION_SECONDS: z.coerce.number().default(60),
   CHAT_MAX_ROUND_VIDEO_DURATION_SECONDS: z.coerce.number().default(60),
+  CHAT_GROUP_SEND_ENABLED: z.coerce.boolean().default(true),
+  CHAT_MEDIA_SEND_ENABLED: z.coerce.boolean().default(true),
+  CHAT_REPLAY_SYNC_ENABLED: z.coerce.boolean().default(true),
+  CHAT_REALTIME_ENABLED: z.coerce.boolean().default(true),
+  CHAT_RATE_LIMIT_STRICT_MODE: z.coerce.boolean().default(false),
 });
 
 const normalizedEnv = {
@@ -204,6 +212,10 @@ if (parsedEnv.NODE_ENV === "production") {
 
   if (parsedEnv.OTP_PROVIDER === "mock") {
     providerValidationErrors.push("OTP_PROVIDER=mock is not allowed in production");
+  }
+
+  if (!["sms", "email"].includes(parsedEnv.OTP_PROVIDER)) {
+    providerValidationErrors.push("OTP_PROVIDER must be 'sms' or 'email' in production");
   }
 
   if (!hasFirebaseEnvConfig && !hasFirebaseServiceAccountConfig) {
@@ -346,6 +358,7 @@ const env = {
     .filter(Boolean),
   rateLimitWindowMs: parsedEnv.RATE_LIMIT_WINDOW_MS,
   rateLimitMax: parsedEnv.RATE_LIMIT_MAX,
+  authenticatedRateLimitMax: parsedEnv.AUTHENTICATED_RATE_LIMIT_MAX,
   redisUrl: redisConnectionDetails.redisUrl,
   redisHost: redisConnectionDetails.redisHost,
   redisPort: redisConnectionDetails.redisPort,
@@ -375,6 +388,11 @@ const env = {
   mediaMaxVideoDurationSeconds: parsedEnv.MEDIA_MAX_VIDEO_DURATION_SECONDS,
   chatMaxAudioDurationSeconds: parsedEnv.CHAT_MAX_AUDIO_DURATION_SECONDS,
   chatMaxRoundVideoDurationSeconds: parsedEnv.CHAT_MAX_ROUND_VIDEO_DURATION_SECONDS,
+  chatGroupSendEnabled: parsedEnv.CHAT_GROUP_SEND_ENABLED,
+  chatMediaSendEnabled: parsedEnv.CHAT_MEDIA_SEND_ENABLED,
+  chatReplaySyncEnabled: parsedEnv.CHAT_REPLAY_SYNC_ENABLED,
+  chatRealtimeEnabled: parsedEnv.CHAT_REALTIME_ENABLED,
+  chatRateLimitStrictMode: parsedEnv.CHAT_RATE_LIMIT_STRICT_MODE,
 };
 
 module.exports = { env };

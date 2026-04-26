@@ -1,8 +1,10 @@
 const User = require("../models/User");
 const Post = require("../models/Post");
 const SearchHistory = require("../models/SearchHistory");
+const Follow = require("../models/Follow");
 const { getPagination, buildPaginationMeta } = require("../utils/pagination");
 const { getFollowStatusesForUsers } = require("./followService");
+const { loadBlockedUserIds } = require("./chatSecurityService");
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const normalizeSearchInput = (value = "") => value.trim().slice(0, 60);
@@ -35,20 +37,72 @@ const mapSuggestionUser = (user) => ({
   location: user.location,
 });
 
+const applyUserVisibility = async (viewerId, users = []) => {
+  if (!users.length) return [];
+
+  const blockedIds = viewerId ? await loadBlockedUserIds(viewerId) : new Set();
+  const userIds = users.map((item) => String(item._id));
+  const followedIds = viewerId
+    ? new Set(
+        (await Follow.find({ follower: viewerId, following: { $in: userIds } })
+          .select("following")
+          .lean()).map((row) => String(row.following))
+      )
+    : new Set();
+
+  return users.filter((item) => {
+    const userId = String(item._id);
+    if (blockedIds.has(userId)) return false;
+    if (item.isSuspended) return false;
+    if (viewerId && userId === String(viewerId)) return true;
+    if (!item.isPrivateAccount) return true;
+    return followedIds.has(userId);
+  });
+};
+
+const applyPostVisibility = async (viewerId, posts = []) => {
+  if (!posts.length) return [];
+
+  const blockedIds = viewerId ? await loadBlockedUserIds(viewerId) : new Set();
+  const privateAuthorIds = posts
+    .map((post) => post.author)
+    .filter((author) => author?.isPrivateAccount)
+    .map((author) => String(author._id));
+  const followedIds = viewerId && privateAuthorIds.length
+    ? new Set(
+        (await Follow.find({ follower: viewerId, following: { $in: privateAuthorIds } })
+          .select("following")
+          .lean()).map((row) => String(row.following))
+      )
+    : new Set();
+
+  return posts.filter((post) => {
+    const author = post.author;
+    if (!author?._id) return false;
+    const authorId = String(author._id);
+    if (blockedIds.has(authorId)) return false;
+    if (viewerId && authorId === String(viewerId)) return true;
+    if (!author.isPrivateAccount) return true;
+    return followedIds.has(authorId);
+  });
+};
+
 const searchUsers = async (query, viewerId = null) => {
   const { page, limit, skip } = getPagination(query);
   const filter = { username: buildSafeRegex(query.q) };
-  const [items, total] = await Promise.all([
-    User.find(filter).select("username fullName avatar bio").skip(skip).limit(limit).lean(),
-    User.countDocuments(filter),
-  ]);
-  const statuses = await getFollowStatusesForUsers(viewerId, items.map((item) => item._id));
+  const items = await User.find(filter)
+    .select("username fullName avatar bio isPrivateAccount isSuspended")
+    .sort({ followersCount: -1, createdAt: -1 })
+    .limit(skip + Math.max(limit * 3, 60))
+    .lean();
+  const visibleItems = (await applyUserVisibility(viewerId, items)).slice(skip, skip + limit);
+  const statuses = await getFollowStatusesForUsers(viewerId, visibleItems.map((item) => item._id));
   return {
-    items: items.map((item) => ({
+    items: visibleItems.map((item) => ({
       ...item,
       followStatus: statuses.get(String(item._id)) || "not_following",
     })),
-    meta: buildPaginationMeta({ page, limit, total }),
+    meta: buildPaginationMeta({ page, limit, total: visibleItems.length < limit && skip === 0 ? visibleItems.length : items.length }),
   };
 };
 
@@ -76,43 +130,39 @@ const searchUsersAdvanced = async (query, viewerId = null) => {
   const { page, limit, skip } = getPagination(query);
   const filter = buildAdvancedUsersFilter(query);
 
-  const [items, total] = await Promise.all([
-    User.find(filter)
-      .select(userPreviewProjection)
-      .sort({ followersCount: -1, createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    User.countDocuments(filter),
-  ]);
-
-  const statuses = await getFollowStatusesForUsers(viewerId, items.map((item) => item._id));
+  const items = await User.find(filter)
+    .select(`${userPreviewProjection} isPrivateAccount isSuspended`)
+    .sort({ followersCount: -1, createdAt: -1 })
+    .limit(skip + Math.max(limit * 3, 60))
+    .lean();
+  const visibleItems = (await applyUserVisibility(viewerId, items)).slice(skip, skip + limit);
+  const statuses = await getFollowStatusesForUsers(viewerId, visibleItems.map((item) => item._id));
 
   return {
-    items: items.map((item) => ({
+    items: visibleItems.map((item) => ({
       ...mapUserPreview(item),
       followStatus: statuses.get(String(item._id)) || "not_following",
     })),
-    meta: buildPaginationMeta({ page, limit, total }),
+    meta: buildPaginationMeta({ page, limit, total: visibleItems.length < limit && skip === 0 ? visibleItems.length : items.length }),
   };
 };
 
-const searchPosts = async (query) => {
+const searchPosts = async (query, viewerId = null) => {
   const { page, limit, skip } = getPagination(query);
   const regex = buildSafeRegex(query.q);
   const filter = {
     $or: [{ caption: regex }, { location: regex }, { hashtags: regex }],
   };
-  const [items, total] = await Promise.all([
-    Post.find(filter)
-      .populate("author", "username fullName avatar")
-      .skip(skip)
-      .limit(limit)
-      .sort({ createdAt: -1 })
-      .lean(),
-    Post.countDocuments(filter),
-  ]);
-  return { items, meta: buildPaginationMeta({ page, limit, total }) };
+  const items = await Post.find(filter)
+    .populate("author", "username fullName avatar isPrivateAccount isSuspended")
+    .limit(skip + Math.max(limit * 3, 60))
+    .sort({ createdAt: -1 })
+    .lean();
+  const visibleItems = (await applyPostVisibility(viewerId, items)).slice(skip, skip + limit);
+  return {
+    items: visibleItems,
+    meta: buildPaginationMeta({ page, limit, total: visibleItems.length < limit && skip === 0 ? visibleItems.length : items.length }),
+  };
 };
 
 const searchHashtags = async (query) => {
@@ -133,7 +183,7 @@ const searchHashtags = async (query) => {
   };
 };
 
-const getSearchSuggestions = async (query = {}) => {
+const getSearchSuggestions = async (query = {}, viewerId = null) => {
   const normalizedQuery = normalizeSearchInput(query.q || "");
   if (!normalizedQuery) {
     return { users: [], hashtags: [], keywords: [] };
@@ -141,7 +191,7 @@ const getSearchSuggestions = async (query = {}) => {
 
   const regex = buildSafeRegex(normalizedQuery);
 
-  const [users, hashtags, schools, locations] = await Promise.all([
+  const [usersRaw, hashtags, schools, locations] = await Promise.all([
     User.find({
       $or: [
         { username: regex },
@@ -183,6 +233,7 @@ const getSearchSuggestions = async (query = {}) => {
       { $limit: 3 },
     ]),
   ]);
+  const users = await applyUserVisibility(viewerId, usersRaw);
 
   const keywords = [...new Set([...schools, ...locations].map((item) => item._id).filter(Boolean))].slice(0, 6);
 

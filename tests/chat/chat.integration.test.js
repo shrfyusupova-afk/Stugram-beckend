@@ -20,6 +20,9 @@ const {
   authHeader,
   createAuthenticatedUser,
 } = require("../helpers/factories");
+const Message = require("../../src/models/Message");
+const GroupMessage = require("../../src/models/GroupMessage");
+const logger = require("../../src/utils/logger");
 
 const { getClient } = setupIntegrationTestSuite();
 const mp4LikeBuffer = Buffer.from([
@@ -171,6 +174,182 @@ describe("Chat integration", () => {
     });
   });
 
+  it("resolves concurrent direct sends with the same clientId to one stored message", async () => {
+    const infoSpy = jest.spyOn(logger, "info");
+    const client = getClient();
+    const { user: firstUser, accessToken: firstToken } = await createAuthenticatedUser({
+      identity: "direct-idempotent-one@example.com",
+      username: "direct_idempotent_one",
+    });
+    const { user: secondUser } = await createAuthenticatedUser({
+      identity: "direct-idempotent-two@example.com",
+      username: "direct_idempotent_two",
+    });
+
+    const conversationResponse = await client
+      .post("/api/v1/chats/conversations")
+      .set(authHeader(firstToken))
+      .send({ participantId: secondUser._id.toString() });
+
+    expect(conversationResponse.statusCode).toBe(201);
+    const conversationId = conversationResponse.body.data._id;
+    const clientId = "direct-idempotency-race-001";
+    const payload = {
+      text: "Only one direct row should exist",
+      clientId,
+    };
+
+    await Message.syncIndexes();
+
+    const [firstResponse, secondResponse] = await Promise.all([
+      client
+        .post(`/api/v1/chats/conversations/${conversationId}/messages`)
+        .set(authHeader(firstToken))
+        .send(payload),
+      client
+        .post(`/api/v1/chats/conversations/${conversationId}/messages`)
+        .set(authHeader(firstToken))
+        .send(payload),
+    ]);
+
+    expect(firstResponse.statusCode).toBe(201);
+    expect(secondResponse.statusCode).toBe(201);
+    expect(firstResponse.body.success).toBe(true);
+    expect(secondResponse.body.success).toBe(true);
+    expect(firstResponse.body.data._id.toString()).toBe(secondResponse.body.data._id.toString());
+    expect(firstResponse.body.data.clientId).toBe(clientId);
+    expect(secondResponse.body.data.clientId).toBe(clientId);
+
+    const storedMessages = await Message.find({
+      conversation: conversationId,
+      sender: firstUser._id,
+      clientId,
+    });
+    expect(storedMessages).toHaveLength(1);
+    expect(infoSpy).toHaveBeenCalledWith(
+      "message_duplicate_clientid_resolved",
+      expect.objectContaining({
+        clientId,
+        targetType: "direct",
+      })
+    );
+  });
+
+  it("survives direct retry storm and replay gap without duplicate rows", async () => {
+    const client = getClient();
+    const { user: firstUser, accessToken: firstToken } = await createAuthenticatedUser({
+      identity: "direct-chaos-one@example.com",
+      username: "direct_chaos_one",
+    });
+    const { user: secondUser } = await createAuthenticatedUser({
+      identity: "direct-chaos-two@example.com",
+      username: "direct_chaos_two",
+    });
+
+    const conversationResponse = await client
+      .post("/api/v1/chats/conversations")
+      .set(authHeader(firstToken))
+      .send({ participantId: secondUser._id.toString() });
+
+    const conversationId = conversationResponse.body.data._id;
+    const clientId = "direct-retry-storm-001";
+
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        client
+          .post(`/api/v1/chats/conversations/${conversationId}/messages`)
+          .set(authHeader(firstToken))
+          .send({ text: "storm", clientId })
+      )
+    );
+
+    responses.forEach((response) => {
+      expect(response.statusCode).toBe(201);
+      expect(response.body.data.clientId).toBe(clientId);
+    });
+
+    const createdId = responses[0].body.data._id.toString();
+
+    const editResponse = await client
+      .patch(`/api/v1/chats/messages/${createdId}`)
+      .set(authHeader(firstToken))
+      .send({ text: "storm-edited" });
+    expect(editResponse.statusCode).toBe(200);
+
+    const reactionResponse = await client
+      .patch(`/api/v1/chats/messages/${createdId}/reaction`)
+      .set(authHeader(firstToken))
+      .send({ emoji: "🔥" });
+    expect(reactionResponse.statusCode).toBe(200);
+
+    const deleteResponse = await client
+      .delete(`/api/v1/chats/messages/${createdId}`)
+      .set(authHeader(firstToken))
+      .send({ scope: "everyone" });
+    expect(deleteResponse.statusCode).toBe(200);
+
+    const replayResponse = await client
+      .get("/api/v1/chats/events")
+      .set(authHeader(firstToken))
+      .query({ conversationId, after: 0, limit: 20 });
+
+    expect(replayResponse.statusCode).toBe(200);
+    const replay = replayResponse.body.data
+    expect(replay.events.length).toBeGreaterThanOrEqual(4);
+    expect(replay.events.map((event) => event.sequence)).toEqual(
+      [...replay.events.map((event) => event.sequence)].sort((a, b) => a - b)
+    );
+
+    const storedMessages = await Message.find({
+      conversation: conversationId,
+      sender: firstUser._id,
+      clientId,
+    });
+    expect(storedMessages).toHaveLength(1);
+  });
+
+  it("blocks existing direct conversation access after a user is blocked", async () => {
+    const client = getClient();
+    const { user: firstUser, accessToken: firstToken } = await createAuthenticatedUser({
+      identity: "direct-block-owner@example.com",
+      username: "direct_block_owner",
+    });
+    const { user: secondUser, accessToken: secondToken } = await createAuthenticatedUser({
+      identity: "direct-block-target@example.com",
+      username: "direct_block_target",
+    });
+
+    const conversationResponse = await client
+      .post("/api/v1/chats/conversations")
+      .set(authHeader(firstToken))
+      .send({ participantId: secondUser._id.toString() });
+    expect(conversationResponse.statusCode).toBe(201);
+
+    const conversationId = conversationResponse.body.data._id;
+
+    const blockResponse = await client
+      .post(`/api/v1/chats/users/${secondUser._id}/block`)
+      .set(authHeader(firstToken));
+    expect(blockResponse.statusCode).toBe(201);
+
+    const fetchConversationResponse = await client
+      .get(`/api/v1/chats/conversations/${conversationId}`)
+      .set(authHeader(firstToken));
+    expect(fetchConversationResponse.statusCode).toBe(403);
+
+    const searchConversationsResponse = await client
+      .get("/api/v1/chats/conversations/search")
+      .set(authHeader(firstToken))
+      .query({ q: secondUser.username });
+    expect(searchConversationsResponse.statusCode).toBe(200);
+    expect(searchConversationsResponse.body.data).toHaveLength(0);
+
+    const otherSideFetchResponse = await client
+      .get(`/api/v1/chats/conversations/${conversationId}`)
+      .set(authHeader(secondToken));
+    expect(otherSideFetchResponse.statusCode).toBe(403);
+  });
+
   it("supports group chat create, messaging, member management, and access control", async () => {
     const client = getClient();
     const { user: owner, accessToken: ownerToken } = await createAuthenticatedUser({
@@ -312,5 +491,123 @@ describe("Chat integration", () => {
     expect(fileMessageResponse.body.data.messageType).toBe("file");
     expect(fileMessageResponse.body.data.media.type).toBe("file");
     expect(fileMessageResponse.body.data.media.fileName).toBe("brief.pdf");
+  });
+
+  it("resolves concurrent group sends with the same clientId to one stored message", async () => {
+    const client = getClient();
+    const { user: owner, accessToken: ownerToken } = await createAuthenticatedUser({
+      identity: "group-idempotent-owner@example.com",
+      username: "group_idempotent_owner",
+    });
+    const { user: memberOne } = await createAuthenticatedUser({
+      identity: "group-idempotent-member@example.com",
+      username: "group_idempotent_member",
+    });
+
+    const createGroupResponse = await client
+      .post("/api/v1/group-chats")
+      .set(authHeader(ownerToken))
+      .field("name", "Idempotent Group")
+      .field("memberIds", JSON.stringify([memberOne._id.toString()]));
+
+    expect(createGroupResponse.statusCode).toBe(201);
+    const groupId = createGroupResponse.body.data._id;
+    const clientId = "group-idempotency-race-001";
+    const payload = {
+      text: "Only one group row should exist",
+      clientId,
+    };
+
+    await GroupMessage.syncIndexes();
+
+    const [firstResponse, secondResponse] = await Promise.all([
+      client
+        .post(`/api/v1/group-chats/${groupId}/messages`)
+        .set(authHeader(ownerToken))
+        .send(payload),
+      client
+        .post(`/api/v1/group-chats/${groupId}/messages`)
+        .set(authHeader(ownerToken))
+        .send(payload),
+    ]);
+
+    expect(firstResponse.statusCode).toBe(201);
+    expect(secondResponse.statusCode).toBe(201);
+    expect(firstResponse.body.success).toBe(true);
+    expect(secondResponse.body.success).toBe(true);
+    expect(firstResponse.body.data._id.toString()).toBe(secondResponse.body.data._id.toString());
+    expect(firstResponse.body.data.clientId).toBe(clientId);
+    expect(secondResponse.body.data.clientId).toBe(clientId);
+
+    const storedMessages = await GroupMessage.find({
+      groupConversation: groupId,
+      sender: owner._id,
+      clientId,
+    });
+    expect(storedMessages).toHaveLength(1);
+  });
+
+  it("survives group retry storm and removed-member send denial safely", async () => {
+    const client = getClient();
+    const { user: owner, accessToken: ownerToken } = await createAuthenticatedUser({
+      identity: "group-chaos-owner@example.com",
+      username: "group_chaos_owner",
+    });
+    const { user: member, accessToken: memberToken } = await createAuthenticatedUser({
+      identity: "group-chaos-member@example.com",
+      username: "group_chaos_member",
+    });
+
+    const createGroupResponse = await client
+      .post("/api/v1/group-chats")
+      .set(authHeader(ownerToken))
+      .field("name", "Chaos Group")
+      .field("memberIds", JSON.stringify([member._id.toString()]));
+
+    const groupId = createGroupResponse.body.data._id;
+    const clientId = "group-retry-storm-001";
+
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        client
+          .post(`/api/v1/group-chats/${groupId}/messages`)
+          .set(authHeader(ownerToken))
+          .send({ text: "group-storm", clientId })
+      )
+    );
+
+    responses.forEach((response) => {
+      expect(response.statusCode).toBe(201);
+      expect(response.body.data.clientId).toBe(clientId);
+    });
+
+    const storedMessages = await GroupMessage.find({
+      groupConversation: groupId,
+      sender: owner._id,
+      clientId,
+    });
+    expect(storedMessages).toHaveLength(1);
+
+    const removeMemberResponse = await client
+      .delete(`/api/v1/group-chats/${groupId}/members/${member._id}`)
+      .set(authHeader(ownerToken));
+    expect(removeMemberResponse.statusCode).toBe(200);
+
+    const deniedSend = await client
+      .post(`/api/v1/group-chats/${groupId}/messages`)
+      .set(authHeader(memberToken))
+      .send({ text: "should fail after removal" });
+
+    expect(deniedSend.statusCode).toBe(403);
+
+    const replayResponse = await client
+      .get("/api/v1/group-chats/events")
+      .set(authHeader(ownerToken))
+      .query({ groupId, after: 0, limit: 20 });
+
+    expect(replayResponse.statusCode).toBe(200);
+    expect(replayResponse.body.data.events.map((event) => event.sequence)).toEqual(
+      [...replayResponse.body.data.events.map((event) => event.sequence)].sort((a, b) => a - b)
+    );
   });
 });

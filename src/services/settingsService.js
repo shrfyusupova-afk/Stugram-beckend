@@ -43,6 +43,23 @@ const mergeHiddenWordsSettings = (settings = {}) => ({
       : defaultHiddenWordsSettings.hideStoryReplies,
 });
 
+const formatSettings = (settings) => ({
+  _id: settings._id,
+  userId: settings.user,
+  user: settings.user,
+  isPrivateAccount: Boolean(settings.isPrivateAccount),
+  isDarkMode: Boolean(settings.isDarkMode),
+  readReceipts: settings.readReceipts !== false,
+  dataSaver: Boolean(settings.dataSaver),
+  videoAutoPlay: settings.videoAutoPlay !== false,
+  sensitiveFilter: Boolean(settings.sensitiveFilter),
+  language: settings.language || "en",
+  notifications: mergeNotificationSettings(settings.notifications),
+  hiddenWords: mergeHiddenWordsSettings(settings.hiddenWords),
+  createdAt: settings.createdAt,
+  updatedAt: settings.updatedAt,
+});
+
 const getOrCreateSettings = async (userId) => {
   let settings = await Settings.findOne({ user: userId });
   const user = await User.findById(userId).select("isPrivateAccount").lean();
@@ -81,6 +98,11 @@ const getOrCreateSettings = async (userId) => {
   return settings;
 };
 
+const getSettings = async (userId) => {
+  const settings = await getOrCreateSettings(userId);
+  return formatSettings(settings);
+};
+
 const updateSettings = async (userId, payload) => {
   const settings = await getOrCreateSettings(userId);
   Object.assign(settings, payload);
@@ -88,7 +110,7 @@ const updateSettings = async (userId, payload) => {
     await User.findByIdAndUpdate(userId, { isPrivateAccount: payload.isPrivateAccount });
   }
   await settings.save();
-  return settings;
+  return formatSettings(settings);
 };
 
 const getNotificationSettings = async (userId) => {
@@ -122,6 +144,7 @@ const updateHiddenWordsSettings = async (userId, payload) => {
 };
 
 module.exports = {
+  getSettings,
   getOrCreateSettings,
   updateSettings,
   getNotificationSettings,
