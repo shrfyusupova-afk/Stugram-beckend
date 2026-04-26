@@ -4,12 +4,14 @@ import androidx.compose.runtime.*
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stugram.app.data.remote.SearchHistoryItem
+import com.stugram.app.data.remote.model.PostModel
 import com.stugram.app.data.remote.model.ProfileSummary
 import com.stugram.app.data.repository.SearchRepository
 import com.stugram.app.data.repository.FollowRepository
 import com.stugram.app.data.repository.PostInteractionRepository
 import com.stugram.app.data.repository.ExploreRepository
 import com.stugram.app.core.social.FollowEvents
+import com.stugram.app.ui.home.mediaAspectRatioFromDimensions
 import com.stugram.app.ui.home.PostData
 import com.stugram.app.ui.home.RecommendedProfile
 import kotlinx.coroutines.async
@@ -26,6 +28,7 @@ class SearchViewModel : ViewModel() {
 
     var searchQuery by mutableStateOf("")
     var isSearchLoading by mutableStateOf(false)
+    var isRefreshing by mutableStateOf(false)
     var searchErrorMessage by mutableStateOf<String?>(null)
     
     // Results
@@ -46,6 +49,9 @@ class SearchViewModel : ViewModel() {
     var selectedGuruh by mutableStateOf<String?>(null)
 
     private var searchJob: Job? = null
+    private var exploreJob: Job? = null
+    private var historyJob: Job? = null
+    private var refreshJob: Job? = null
 
     init {
         loadExploreData()
@@ -95,41 +101,58 @@ class SearchViewModel : ViewModel() {
     }
 
     private fun loadExploreData() {
-        viewModelScope.launch {
-            try {
-                coroutineScope {
-                    val interactionDeferred = async { loadInteractionIds() }
-                    val creatorsDeferred = async { exploreRepository.getCreators(page = 1, limit = 10) }
-                    val trendingDeferred = async { exploreRepository.getTrending(limit = 20) }
-                    val (likedIds, savedIds) = interactionDeferred.await()
-                    val creatorsRes = creatorsDeferred.await()
-                    if (creatorsRes.isSuccessful) {
-                        activeCreators = creatorsRes.body()?.data?.map { it.toUIModel() } ?: emptyList()
-                    }
-
-                    val trendingRes = trendingDeferred.await()
-                    if (trendingRes.isSuccessful) {
-                        trendingPosts = trendingRes.body()?.data?.map { it.toPostData(likedIds, savedIds) } ?: emptyList()
-                    }
-                }
-            } catch (e: Exception) {
-                searchErrorMessage = "Qidiruv ma'lumotlarini yuklashda xatolik yuz berdi"
-            }
+        if (exploreJob?.isActive == true) return
+        exploreJob = viewModelScope.launch {
+            loadExploreDataNow()
         }
     }
 
     private fun loadSearchHistory() {
-        viewModelScope.launch {
-            try {
-                val res = searchRepository.getSearchHistory(1, 20)
-                if (res.isSuccessful) {
-                    historyResults = res.body()?.data ?: emptyList()
-                }
-            } catch (e: Exception) {}
+        if (historyJob?.isActive == true) return
+        historyJob = viewModelScope.launch {
+            loadSearchHistoryNow()
         }
     }
 
+    private suspend fun loadExploreDataNow() {
+        try {
+            coroutineScope {
+                val interactionDeferred = async { loadInteractionIds() }
+                val creatorsDeferred = async { exploreRepository.getCreators(page = 1, limit = 30) }
+                val trendingDeferred = async { exploreRepository.getTrending(limit = 60) }
+                val (likedIds, savedIds) = interactionDeferred.await()
+                val creatorsRes = creatorsDeferred.await()
+                if (creatorsRes.isSuccessful) {
+                    activeCreators = creatorsRes.body()?.data?.map { it.toUIModel() } ?: emptyList()
+                }
+
+                val trendingRes = trendingDeferred.await()
+                if (trendingRes.isSuccessful) {
+                    val trendingData = trendingRes.body()?.data
+                    trendingPosts = buildExploreLoop(trendingData?.reels.orEmpty(), trendingData?.posts.orEmpty())
+                        .distinctBy { it.id }
+                        .map { it.toPostData(likedIds, savedIds) }
+                    if (activeCreators.isEmpty()) {
+                        activeCreators = trendingData?.creators.orEmpty().map { it.toUIModel() }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            searchErrorMessage = "Qidiruv ma'lumotlarini yuklashda xatolik yuz berdi"
+        }
+    }
+
+    private suspend fun loadSearchHistoryNow() {
+        try {
+            val res = searchRepository.getSearchHistory(1, 20)
+            if (res.isSuccessful) {
+                historyResults = res.body()?.data ?: emptyList()
+            }
+        } catch (e: Exception) {}
+    }
+
     suspend fun performSearch(query: String = searchQuery) {
+        if (isSearchLoading) return
         val normalizedQuery = query.trim()
         isSearchLoading = true
         searchErrorMessage = null
@@ -363,6 +386,23 @@ class SearchViewModel : ViewModel() {
         }
     }
 
+    fun refresh() {
+        if (refreshJob?.isActive == true) return
+        refreshJob = viewModelScope.launch {
+            isRefreshing = true
+            try {
+                if (hasActiveFilters() || searchQuery.isNotBlank()) {
+                    performSearch(searchQuery)
+                } else {
+                    loadExploreDataNow()
+                    loadSearchHistoryNow()
+                }
+            } finally {
+                isRefreshing = false
+            }
+        }
+    }
+
     fun recordUserSelection(profile: RecommendedProfile) {
         viewModelScope.launch {
             try {
@@ -461,7 +501,28 @@ fun ProfileSummary.toUIModel(): RecommendedProfile {
     )
 }
 
-private fun com.stugram.app.data.remote.model.PostModel.toPostData(
+private fun buildExploreLoop(reels: List<PostModel>, posts: List<PostModel>): List<PostModel> {
+    val loop = mutableListOf<PostModel>()
+    var reelIndex = 0
+    var postIndex = 0
+    while (reelIndex < reels.size || postIndex < posts.size) {
+        repeat(2) {
+            if (reelIndex < reels.size) {
+                loop += reels[reelIndex]
+                reelIndex += 1
+            }
+        }
+        repeat(4) {
+            if (postIndex < posts.size) {
+                loop += posts[postIndex]
+                postIndex += 1
+            }
+        }
+    }
+    return loop
+}
+
+private fun PostModel.toPostData(
     likedIds: Set<String> = emptySet(),
     savedIds: Set<String> = emptySet()
 ): PostData {
@@ -472,6 +533,7 @@ private fun com.stugram.app.data.remote.model.PostModel.toPostData(
         user = this.author.username,
         authorFullName = this.author.fullName,
         image = this.media.firstOrNull()?.url,
+        thumbnailUrl = this.media.firstOrNull()?.thumbnailUrl,
         userAvatar = this.author.avatar,
         caption = this.caption,
         likes = this.likesCount,
@@ -479,6 +541,8 @@ private fun com.stugram.app.data.remote.model.PostModel.toPostData(
         isLiked = likedIds.contains(this.id),
         isSaved = savedIds.contains(this.id),
         isVideo = this.media.firstOrNull()?.type == "video",
+        mediaAspectRatio = this.media.firstOrNull()?.let { mediaAspectRatioFromDimensions(it.width, it.height) },
+        authorFollowStatus = this.author.followStatus,
         createdAt = this.createdAt
     )
 }

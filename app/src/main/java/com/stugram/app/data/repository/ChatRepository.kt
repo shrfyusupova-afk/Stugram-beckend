@@ -5,6 +5,7 @@ import android.net.Uri
 import com.stugram.app.data.remote.RetrofitClient
 import com.stugram.app.data.remote.model.BaseResponse
 import com.stugram.app.data.remote.model.ChatMessageModel
+import com.stugram.app.domain.chat.ChatDomainEvent
 import com.stugram.app.data.remote.model.DirectConversationModel
 import com.stugram.app.data.remote.model.PaginatedResponse
 import com.stugram.app.data.remote.model.SendChatMessageRequest
@@ -13,6 +14,7 @@ import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Response
+import java.io.File
 
 class ChatRepository {
     private val chatApi get() = RetrofitClient.chatApi
@@ -26,6 +28,21 @@ class ChatRepository {
 
     suspend fun searchConversations(query: String, page: Int = 1, limit: Int = 50): Response<PaginatedResponse<DirectConversationModel>> =
         chatApi.searchConversations(query, page, limit)
+
+    suspend fun getSummary() =
+        chatApi.getSummary()
+
+    suspend fun getDirectEvents(
+        conversationId: String,
+        afterSequence: Long,
+        limit: Int = 100
+    ): List<ChatDomainEvent> {
+        val response = chatApi.getConversationEvents(conversationId, afterSequence, limit)
+        if (!response.isSuccessful) return emptyList()
+        return response.body()?.data?.events.orEmpty()
+            .sortedBy { it.sequence }
+            .mapNotNull(ChatReplayEventMapper::toDomainEvent)
+    }
 
     suspend fun getConversationMessages(conversationId: String, page: Int, limit: Int): Response<PaginatedResponse<ChatMessageModel>> =
         chatApi.getConversationMessages(conversationId, page, limit)
@@ -42,7 +59,8 @@ class ChatRepository {
         uri: Uri,
         mimeType: String,
         replyToMessageId: String? = null,
-        messageTypeOverride: String? = null
+        messageTypeOverride: String? = null,
+        clientId: String? = null
     ): Response<BaseResponse<ChatMessageModel>> {
         val resolvedType = messageTypeOverride ?: when {
             mimeType.startsWith("audio") -> "voice"
@@ -59,10 +77,37 @@ class ChatRepository {
             )
             val messageTypePart = resolvedType.toRequestBody("text/plain".toMediaType())
             val replyPart = replyToMessageId?.toRequestBody("text/plain".toMediaType())
-            sendWithRefresh { chatApi.sendMediaMessage(conversationId, mediaPart, messageTypePart, replyPart) }
+            val clientIdPart = clientId?.toRequestBody("text/plain".toMediaType())
+            sendWithRefresh { chatApi.sendMediaMessage(conversationId, mediaPart, messageTypePart, replyPart, clientIdPart) }
         } finally {
             file.delete()
         }
+    }
+
+    suspend fun sendStagedMediaMessage(
+        conversationId: String,
+        file: File,
+        mimeType: String,
+        replyToMessageId: String? = null,
+        messageTypeOverride: String? = null,
+        clientId: String? = null,
+        displayName: String? = null
+    ): Response<BaseResponse<ChatMessageModel>> {
+        val resolvedType = messageTypeOverride ?: when {
+            mimeType.startsWith("audio") -> "voice"
+            mimeType.startsWith("video") -> "video"
+            mimeType.startsWith("image") -> "image"
+            else -> "file"
+        }
+        val mediaPart = MultipartBody.Part.createFormData(
+            "media",
+            displayName?.takeIf { it.isNotBlank() } ?: file.name,
+            file.asRequestBody(mimeType.toMediaType())
+        )
+        val messageTypePart = resolvedType.toRequestBody("text/plain".toMediaType())
+        val replyPart = replyToMessageId?.toRequestBody("text/plain".toMediaType())
+        val clientIdPart = clientId?.toRequestBody("text/plain".toMediaType())
+        return sendWithRefresh { chatApi.sendMediaMessage(conversationId, mediaPart, messageTypePart, replyPart, clientIdPart) }
     }
 
     suspend fun markMessageSeen(messageId: String): Response<BaseResponse<ChatMessageModel>> =

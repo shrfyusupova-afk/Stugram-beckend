@@ -28,7 +28,7 @@ class PostRepository {
         val preparedFiles = mediaUris.mapIndexed { index, uri ->
             val mimeType = context.contentResolver.getType(uri) ?: "image/*"
             val file = context.copyUriToTempFile(uri, "post_$index", mimeType)
-            file to mimeType
+            file to normalizeMediaUploadMimeType(mimeType, file.name)
         }
         return try {
             val mediaParts = preparedFiles.map { (file, mimeType) ->
@@ -40,7 +40,14 @@ class PostRepository {
             }
             val captionPart = caption?.toRequestBody("text/plain".toMediaType())
             val locationPart = location?.toRequestBody("text/plain".toMediaType())
-            val hashtagParts = hashtags.map {
+            // Multer exposes a single repeated multipart field as a String; duplicating
+            // one tag keeps the deployed backend validator receiving an Array.
+            val multipartHashtags = when (hashtags.size) {
+                0 -> emptyList()
+                1 -> listOf(hashtags.first(), hashtags.first())
+                else -> hashtags
+            }
+            val hashtagParts = multipartHashtags.map {
                 MultipartBody.Part.createFormData("hashtags", it)
             }
             mediaApi.createPost(mediaParts, captionPart, locationPart, hashtagParts)

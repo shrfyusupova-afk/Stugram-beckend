@@ -9,15 +9,48 @@ import com.stugram.app.data.remote.model.GroupConversationModel
 import com.stugram.app.data.remote.model.GroupMemberModel
 import com.stugram.app.data.remote.model.PaginatedResponse
 import com.stugram.app.data.remote.model.SendChatMessageRequest
+import com.stugram.app.domain.chat.ChatDomainEvent
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Response
+import java.io.File
 
 class GroupChatRepository {
     private val groupChatApi get() = RetrofitClient.groupChatApi
     private val authRepository by lazy { AuthRepository(RetrofitClient.requireTokenManager()) }
+
+    suspend fun createGroupChat(
+        context: Context,
+        name: String,
+        memberIds: List<String>,
+        avatarUri: Uri? = null
+    ): Response<BaseResponse<GroupConversationModel>> {
+        val namePart = name.trim().toRequestBody("text/plain".toMediaType())
+        val memberIdsPart = memberIds.distinct().joinToString(
+            prefix = "[",
+            postfix = "]",
+            separator = ","
+        ) { "\"$it\"" }.toRequestBody("text/plain".toMediaType())
+
+        if (avatarUri == null) {
+            return sendWithRefresh { groupChatApi.createGroupChat(namePart, memberIdsPart, null) }
+        }
+
+        val mimeType = context.contentResolver.getType(avatarUri) ?: "image/*"
+        val file = context.copyUriToTempFile(avatarUri, "group_avatar", mimeType)
+        return try {
+            val avatarPart = MultipartBody.Part.createFormData(
+                "avatar",
+                file.name,
+                file.asRequestBody(mimeType.toMediaType())
+            )
+            sendWithRefresh { groupChatApi.createGroupChat(namePart, memberIdsPart, avatarPart) }
+        } finally {
+            file.delete()
+        }
+    }
 
     suspend fun getGroupChats(page: Int, limit: Int): Response<PaginatedResponse<GroupConversationModel>> =
         groupChatApi.getGroupChats(page, limit)
@@ -27,6 +60,18 @@ class GroupChatRepository {
 
     suspend fun getGroupMembers(groupId: String, page: Int, limit: Int): Response<PaginatedResponse<GroupMemberModel>> =
         groupChatApi.getGroupMembers(groupId, page, limit)
+
+    suspend fun getGroupEvents(
+        groupId: String,
+        afterSequence: Long,
+        limit: Int = 100
+    ): List<ChatDomainEvent> {
+        val response = groupChatApi.getGroupEvents(groupId, afterSequence, limit)
+        if (!response.isSuccessful) return emptyList()
+        return response.body()?.data?.events.orEmpty()
+            .sortedBy { it.sequence }
+            .mapNotNull(ChatReplayEventMapper::toDomainEvent)
+    }
 
     suspend fun getGroupMessages(groupId: String, page: Int, limit: Int): Response<PaginatedResponse<ChatMessageModel>> =
         groupChatApi.getGroupMessages(groupId, page, limit)
@@ -40,7 +85,8 @@ class GroupChatRepository {
         uri: Uri,
         mimeType: String,
         replyToMessageId: String? = null,
-        messageTypeOverride: String? = null
+        messageTypeOverride: String? = null,
+        clientId: String? = null
     ): Response<BaseResponse<ChatMessageModel>> {
         val resolvedType = messageTypeOverride ?: when {
             mimeType.startsWith("audio") -> "voice"
@@ -57,10 +103,37 @@ class GroupChatRepository {
             )
             val messageTypePart = resolvedType.toRequestBody("text/plain".toMediaType())
             val replyPart = replyToMessageId?.toRequestBody("text/plain".toMediaType())
-            sendWithRefresh { groupChatApi.sendGroupMediaMessage(groupId, mediaPart, messageTypePart, replyPart) }
+            val clientIdPart = clientId?.toRequestBody("text/plain".toMediaType())
+            sendWithRefresh { groupChatApi.sendGroupMediaMessage(groupId, mediaPart, messageTypePart, replyPart, clientIdPart) }
         } finally {
             file.delete()
         }
+    }
+
+    suspend fun sendStagedGroupMediaMessage(
+        groupId: String,
+        file: File,
+        mimeType: String,
+        replyToMessageId: String? = null,
+        messageTypeOverride: String? = null,
+        clientId: String? = null,
+        displayName: String? = null
+    ): Response<BaseResponse<ChatMessageModel>> {
+        val resolvedType = messageTypeOverride ?: when {
+            mimeType.startsWith("audio") -> "voice"
+            mimeType.startsWith("video") -> "video"
+            mimeType.startsWith("image") -> "image"
+            else -> "file"
+        }
+        val mediaPart = MultipartBody.Part.createFormData(
+            "media",
+            displayName?.takeIf { it.isNotBlank() } ?: file.name,
+            file.asRequestBody(mimeType.toMediaType())
+        )
+        val messageTypePart = resolvedType.toRequestBody("text/plain".toMediaType())
+        val replyPart = replyToMessageId?.toRequestBody("text/plain".toMediaType())
+        val clientIdPart = clientId?.toRequestBody("text/plain".toMediaType())
+        return sendWithRefresh { groupChatApi.sendGroupMediaMessage(groupId, mediaPart, messageTypePart, replyPart, clientIdPart) }
     }
 
     suspend fun markGroupMessageSeen(groupId: String, messageId: String): Response<BaseResponse<ChatMessageModel>> =

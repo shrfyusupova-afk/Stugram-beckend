@@ -56,6 +56,7 @@ fun ReelsScreen(
     onToggleSave: (PostData) -> Unit = {},
     onCommentAdded: (String) -> Unit = {},
     onToggleFollow: (PostData, Boolean, (Boolean) -> Unit) -> Unit = { _, _, _ -> },
+    currentUserId: String? = null,
     onProfileClick: (String) -> Unit,
     initialPage: Int = 0,
     contentBottomPadding: Dp = 100.dp,
@@ -130,17 +131,19 @@ fun ReelsScreen(
                     modifier = Modifier.fillMaxSize(),
                     beyondViewportPageCount = 1
                 ) { page ->
-                    ReelItem(
-                        reel = reels[page],
-                        accentBlue = accentBlue,
+                        ReelItem(
+                            reel = reels[page],
+                            accentBlue = accentBlue,
                         onMoreClick = { showSettingsModal = true },
                         onCommentsClick = { selectedCommentsPost = it },
                         onToggleLike = onToggleLike,
                         onToggleSave = onToggleSave,
                         onToggleFollow = onToggleFollow,
-                        onProfileClick = onProfileClick,
-                        bottomPadding = contentBottomPadding
-                    )
+                            currentUserId = currentUserId,
+                            onProfileClick = onProfileClick,
+                            isActive = pagerState.currentPage == page,
+                            bottomPadding = contentBottomPadding
+                        )
                 }
             }
         }
@@ -193,13 +196,19 @@ fun ReelItem(
     onToggleLike: (PostData) -> Unit,
     onToggleSave: (PostData) -> Unit,
     onToggleFollow: (PostData, Boolean, (Boolean) -> Unit) -> Unit,
+    currentUserId: String? = null,
     onProfileClick: (String) -> Unit,
+    isActive: Boolean = true,
     bottomPadding: Dp = 100.dp
 ) {
     var isCaptionExpanded by remember { mutableStateOf(false) }
     var showLikeHeart by remember { mutableStateOf(false) }
     var heartOffset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
-    var isFollowing by remember(reel.authorId) { mutableStateOf(false) }
+    var isFollowing by remember(reel.authorId, reel.authorFollowStatus) {
+        mutableStateOf(reel.authorFollowStatus?.lowercase()?.trim() == "following")
+    }
+    val isOwnReel = reel.authorFollowStatus?.lowercase()?.trim() == "self" ||
+        (!currentUserId.isNullOrBlank() && !reel.authorId.isNullOrBlank() && reel.authorId == currentUserId)
     val scope = rememberCoroutineScope()
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -221,11 +230,12 @@ fun ReelItem(
             if (reel.isVideo && !reel.image.isNullOrBlank()) {
                 ReelVideoPlayer(
                     url = reel.image,
+                    isActive = isActive,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
                 AppBanner(
-                    imageModel = reel.image,
+                    imageModel = reel.thumbnailUrl ?: reel.image,
                     title = reel.user,
                     modifier = Modifier.fillMaxSize(),
                     isDarkMode = true
@@ -294,20 +304,22 @@ fun ReelItem(
                         fontSize = 14.sp,
                         modifier = Modifier.clickable { onProfileClick(reel.user) }
                     )
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        if (isFollowing) "Following" else "Follow",
-                        color = accentBlue,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        modifier = Modifier
-                            .clickable {
-                                onToggleFollow(reel, isFollowing) { newValue ->
-                                    isFollowing = newValue
+                    if (!isOwnReel) {
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            if (isFollowing) "Following" else "Follow",
+                            color = accentBlue,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier
+                                .clickable {
+                                    onToggleFollow(reel, isFollowing) { newValue ->
+                                        isFollowing = newValue
+                                    }
                                 }
-                            }
-                            .padding(horizontal = 4.dp)
-                    )
+                                .padding(horizontal = 4.dp)
+                        )
+                    }
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -333,8 +345,9 @@ fun ReelItem(
 }
 
 @Composable
-private fun ReelVideoPlayer(
+fun ReelVideoPlayer(
     url: String,
+    isActive: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -342,9 +355,18 @@ private fun ReelVideoPlayer(
     val exoPlayer = remember(url) {
         ExoPlayer.Builder(context).build().apply {
             repeatMode = Player.REPEAT_MODE_ONE
-            playWhenReady = true
+            playWhenReady = isActive
             setMediaItem(MediaItem.fromUri(url))
             prepare()
+        }
+    }
+
+    LaunchedEffect(exoPlayer, isActive) {
+        exoPlayer.playWhenReady = isActive
+        if (isActive) {
+            runCatching { exoPlayer.play() }
+        } else {
+            runCatching { exoPlayer.pause() }
         }
     }
 

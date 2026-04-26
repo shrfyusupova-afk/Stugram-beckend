@@ -1,6 +1,7 @@
 package com.stugram.app.data.remote.model
 
 import com.google.gson.annotations.SerializedName
+import com.google.gson.JsonObject
 
 data class BaseResponse<T>(
     val success: Boolean,
@@ -14,6 +15,12 @@ data class PaginatedResponse<T>(
     val message: String,
     val data: List<T> = emptyList(),
     val meta: MetaData? = null
+)
+
+data class ExploreTrendingData(
+    val posts: List<PostModel> = emptyList(),
+    val reels: List<PostModel> = emptyList(),
+    val creators: List<ProfileSummary> = emptyList()
 )
 
 data class MetaData(
@@ -177,6 +184,56 @@ data class ProfileQuickSummaryModel(
     val storiesActive: Boolean = false
 )
 
+data class ProfileHighlightItemModel(
+    val id: String,
+    val storyId: String? = null,
+    val mediaUrl: String,
+    val thumbnailUrl: String? = null,
+    val mediaType: String,
+    val width: Int? = null,
+    val height: Int? = null,
+    val duration: Double? = null,
+    val order: Int = 0
+)
+
+data class ProfileHighlightModel(
+    val id: String,
+    val ownerId: String,
+    val title: String,
+    val coverImageUrl: String? = null,
+    val coverUrl: String? = null,
+    val storyIds: List<String> = emptyList(),
+    val items: List<ProfileHighlightItemModel> = emptyList(),
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+    val isArchived: Boolean = false
+)
+
+data class CreateProfileHighlightRequest(
+    val title: String,
+    val storyIds: List<String>,
+    val coverStoryId: String? = null
+)
+
+data class UpdateProfileHighlightRequest(
+    val title: String? = null,
+    val coverStoryId: String? = null
+)
+
+data class AddStoryToHighlightRequest(
+    val storyId: String,
+    val insertAt: Int? = null,
+    val makeCover: Boolean = false
+)
+
+data class DeleteProfileHighlightResult(
+    val deleted: Boolean = false,
+    val id: String? = null,
+    val removedStoryId: String? = null,
+    val becameEmpty: Boolean = false,
+    val highlight: ProfileHighlightModel? = null
+)
+
 data class ProfileSummary(
     @SerializedName("_id") val id: String,
     val username: String,
@@ -227,6 +284,11 @@ data class GroupConversationModel(
     val membersCount: Int = 0
 )
 
+data class ChatSummaryModel(
+    val totalUnreadMessages: Int = 0,
+    val unreadConversations: Int = 0
+)
+
 data class GroupMemberModel(
     val user: ProfileSummary,
     val joinedAt: String? = null,
@@ -237,6 +299,7 @@ data class ChatMessageModel(
     @SerializedName("_id") val id: String,
     val conversation: String? = null,
     val sender: ProfileSummary? = null,
+    val clientId: String? = null,
     val text: String? = null,
     val messageType: String = "text",
     val media: PostMediaModel? = null,
@@ -256,7 +319,33 @@ data class ChatMessageModel(
     val deletedForEveryoneBy: String? = null,
     val readAt: String? = null,
     val createdAt: String? = null,
-    val updatedAt: String? = null
+    val updatedAt: String? = null,
+    val serverSequence: Long? = null,
+    val editVersion: Int? = null,
+    val reactionVersion: Int? = null,
+    val deliveryVersion: Int? = null,
+    val deleteSequence: Long? = null
+)
+
+data class ChatReplayEventsData(
+    val targetId: String,
+    val targetType: String,
+    val fromSequence: Long = 0,
+    val toSequence: Long = 0,
+    val events: List<ChatReplayEventModel> = emptyList(),
+    val hasMore: Boolean = false
+)
+
+data class ChatReplayEventModel(
+    val sequence: Long,
+    val type: String,
+    val targetType: String,
+    val targetId: String,
+    val messageId: String? = null,
+    val clientId: String? = null,
+    val actorId: String? = null,
+    val createdAt: String? = null,
+    val payload: JsonObject? = null
 )
 
 data class MessageDeleteResult(
@@ -292,7 +381,8 @@ data class ChatReplyMessageModel(
 data class SendChatMessageRequest(
     val text: String? = null,
     val messageType: String = "text",
-    val replyToMessageId: String? = null
+    val replyToMessageId: String? = null,
+    val clientId: String? = null
 )
 
 data class UpdateProfileRequest(
@@ -313,6 +403,7 @@ data class PostMediaModel(
     val url: String,
     val publicId: String,
     val type: String,
+    val thumbnailUrl: String? = null,
     val width: Int? = null,
     val height: Int? = null,
     val duration: Double? = null,

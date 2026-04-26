@@ -49,15 +49,24 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.AnnotatedString
 import android.widget.Toast
+import android.util.Log
 import org.json.JSONObject
 import java.util.UUID
 import com.stugram.app.core.storage.TokenManager
 import com.stugram.app.data.remote.model.ChatMessageModel
 import com.stugram.app.data.remote.model.GroupMemberModel
+import com.stugram.app.data.repository.ChatLocalCache
+import com.stugram.app.data.repository.ChatPendingOutbox
 import com.stugram.app.data.repository.GroupChatRepository
+import com.stugram.app.data.repository.MessagesInboxCache
+import com.stugram.app.data.repository.PendingChatEnvelope
+import com.stugram.app.domain.chat.ChatMessageSnapshot
+import com.stugram.app.domain.chat.ChatReducer
+import com.stugram.app.domain.chat.MessageSource
 import com.stugram.app.data.remote.RetrofitClient
 import com.stugram.app.core.messaging.ForwardDraft
 import com.stugram.app.core.messaging.ForwardDraftStore
+import com.stugram.app.core.messaging.ChatOutboxScheduler
 import com.stugram.app.ui.theme.PremiumBlue
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -75,7 +84,8 @@ fun GroupChatDetailScreen(
     onThemeChange: (Boolean) -> Unit,
     onBack: () -> Unit,
     onNavigateToChat: (String, String, Boolean) -> Unit = { _, _, _ -> },
-    onNavigateToGroupChat: (String, String) -> Unit = { _, _ -> }
+    onNavigateToGroupChat: (String, String) -> Unit = { _, _ -> },
+    onNavigateToPost: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val tokenManager = remember { TokenManager(context.applicationContext) }
@@ -85,13 +95,16 @@ fun GroupChatDetailScreen(
         GroupChatRepository()
     }
     val currentUser by tokenManager.currentUser.collectAsState(initial = null)
+    val presenceMap by chatSocketManager.presenceState.collectAsState()
     val forwardDraft by ForwardDraftStore.draft.collectAsState(initial = null)
     var groupRefreshNonce by remember { mutableIntStateOf(0) }
-    val groupDetail by produceState<com.stugram.app.data.remote.model.GroupConversationModel?>(initialValue = null, key1 = groupId, key2 = groupRefreshNonce) {
-        value = runCatching { groupRepository.getGroupChatDetail(groupId).body()?.data }.getOrNull()
+    var groupDetail by remember(groupId, groupRefreshNonce) {
+        mutableStateOf<com.stugram.app.data.remote.model.GroupConversationModel?>(null)
     }
-    val groupMembers by produceState(initialValue = emptyList<GroupMemberModel>(), key1 = groupId, key2 = groupRefreshNonce) {
-        value = runCatching { groupRepository.getGroupMembers(groupId, page = 1, limit = 100).body()?.data.orEmpty() }.getOrDefault(emptyList())
+    var groupMembers by remember(groupId, groupRefreshNonce) { mutableStateOf(emptyList<GroupMemberModel>()) }
+    LaunchedEffect(groupId, groupRefreshNonce) {
+        groupDetail = runCatching { groupRepository.getGroupChatDetail(groupId).body()?.data }.getOrNull()
+        groupMembers = runCatching { groupRepository.getGroupMembers(groupId, page = 1, limit = 100).body()?.data.orEmpty() }.getOrDefault(emptyList())
     }
     val backgroundColor = if (isDarkMode) Color.Black else Color.White
     val contentColor = if (isDarkMode) Color.White else Color.Black
@@ -100,9 +113,19 @@ fun GroupChatDetailScreen(
     val glassBorder = if (isDarkMode) Color.White.copy(alpha = 0.1f) else Color.Black.copy(0.08f)
 
     val headerHeight = 110.dp
-    val headerContentHeight = 52.dp 
+    val headerContentHeight = 52.dp
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val pinnedBannerTop = statusBarTop + 64.dp
+    val onlineMembersCount = remember(groupMembers, presenceMap, currentUser?.id) {
+        groupMembers.count { member ->
+            member.user.id != currentUser?.id && presenceMap[member.user.id]?.isOnline == true
+        }
+    }
 
-    var messageText by remember { mutableStateOf("") }
+    val draftKey = remember(groupId) { "group:$groupId" }
+    var messageText by remember(groupId) {
+        mutableStateOf(ChatPendingOutbox.loadDraft(context, draftKey))
+    }
     var showGroupInfo by remember { mutableStateOf(false) }
     var showSearchModal by remember { mutableStateOf(false) }
     var isTyping by remember { mutableStateOf(false) }
@@ -124,53 +147,214 @@ fun GroupChatDetailScreen(
     var isInitialLoading by remember(groupId) { mutableStateOf(false) }
     var isLoadingMore by remember(groupId) { mutableStateOf(false) }
     var loadError by remember(groupId) { mutableStateOf<String?>(null) }
+    var unseenNewMessages by remember(groupId) { mutableIntStateOf(0) }
+    var sendingLocalIds by remember(groupId) { mutableStateOf(setOf<String>()) }
+    val recentSendFingerprints = remember(groupId) { LinkedHashMap<String, Long>() }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val isAtLatest by remember(messages, listState) {
+        derivedStateOf {
+            messages.isEmpty() || listState.firstVisibleItemIndex <= 1
+        }
+    }
 
-    fun mergeGroupMessages(existing: List<GroupMessageData>, incoming: List<GroupMessageData>): List<GroupMessageData> {
+    fun mergeGroupMessages(
+        existing: List<GroupMessageData>,
+        incoming: List<GroupMessageData>,
+        incomingSource: MessageSource = MessageSource.SocketEvent
+    ): List<GroupMessageData> {
         val byBackendId = LinkedHashMap<String, GroupMessageData>(existing.size + incoming.size)
+        val aliasToKey = LinkedHashMap<String, String>(existing.size + incoming.size)
         fun put(msg: GroupMessageData) {
-            val key = msg.backendId ?: return
-            val prev = byBackendId[key]
-            byBackendId[key] = if (prev == null) msg else prev.mergeFrom(msg)
+            val aliases = listOfNotNull(msg.localId, msg.backendId).distinct()
+            if (aliases.isEmpty()) return
+            val existingKey = aliases.firstNotNullOfOrNull { alias ->
+                aliasToKey[alias] ?: alias.takeIf { byBackendId.containsKey(it) }
+            }
+            val prev = existingKey?.let { byBackendId.remove(it) }
+            val merged = if (prev == null) msg else prev.mergeFrom(msg, incomingSource)
+            val key = merged.backendId ?: merged.localId ?: aliases.first()
+            byBackendId[key] = merged
+            (aliases + listOfNotNull(merged.localId, merged.backendId)).distinct().forEach { alias ->
+                aliasToKey[alias] = key
+            }
         }
         existing.forEach(::put)
         incoming.forEach(::put)
-        return byBackendId.values.sortedWith(compareByDescending<GroupMessageData> { it.timestamp }.thenByDescending { it.backendId ?: "" })
+        return byBackendId.values.sortedWith(compareByDescending<GroupMessageData> { it.timestamp }.thenByDescending { it.backendId ?: it.localId ?: "" })
     }
 
-    fun removeOptimisticMessage(tempBackendId: String) {
-        messages = messages.filterNot { it.backendId == tempBackendId }
+    fun updateLocalMessage(localId: String, transform: (GroupMessageData) -> GroupMessageData) {
+        messages = messages.map { message ->
+            if (message.localId == localId || message.backendId == localId) transform(message) else message
+        }
     }
 
-    fun finalizeOptimisticMessage(tempBackendId: String, sentMessage: GroupMessageData) {
-        removeOptimisticMessage(tempBackendId)
-        messages = mergeGroupMessages(messages, listOf(sentMessage))
+    fun removeOptimisticMessage(localId: String) {
+        messages = messages.filterNot { it.localId == localId || it.backendId == localId }
+    }
+
+    fun acceptGroupOutgoingFingerprint(fingerprint: String, windowMs: Long = 1_500L): Boolean {
+        val now = System.currentTimeMillis()
+        val iterator = recentSendFingerprints.entries.iterator()
+        while (iterator.hasNext()) {
+            if (now - iterator.next().value > windowMs) {
+                iterator.remove()
+            }
+        }
+        val previous = recentSendFingerprints[fingerprint]
+        if (previous != null && now - previous <= windowMs) {
+            Log.d("ChatReliability", "group_send_deduped groupId=$groupId source=fingerprint_guard timestamp=$now")
+            return false
+        }
+        recentSendFingerprints[fingerprint] = now
+        return true
+    }
+
+    fun finalizeOptimisticMessage(localId: String, sentMessage: GroupMessageData) {
+        removeOptimisticMessage(localId)
+        messages = mergeGroupMessages(messages, listOf(sentMessage), MessageSource.HttpResponse)
     }
 
     fun buildOptimisticMessage(
-        tempBackendId: String,
+        localId: String,
         text: String,
         senderName: String,
         senderAvatar: String? = null,
         messageType: String = "text",
         media: ChatMediaUi? = null,
-        replyPreview: String? = null
+        replyPreview: String? = null,
+        pendingPayload: PendingMessagePayload? = null,
+        retryCount: Int = 0
     ): GroupMessageData {
         return GroupMessageData(
-            id = tempBackendId.hashCode(),
-            backendId = tempBackendId,
+            id = localId.hashCode(),
+            localId = localId,
+            backendId = null,
             text = text,
             senderName = senderName,
             senderAvatar = senderAvatar,
             isMe = true,
             timestamp = System.currentTimeMillis(),
-            status = MessageStatus.SENT,
+            status = MessageStatus.SENDING,
+            errorReason = null,
+            retryCount = retryCount,
             messageType = messageType,
             media = media,
+            pendingPayload = pendingPayload,
             replyPreview = replyPreview
         )
+    }
+
+    fun mergePersistedPendingMessages() {
+        val pending = ChatPendingOutbox.loadGroup(context, groupId)
+            .map { it.toGroupUiMessage(currentUser?.fullName ?: currentUser?.username ?: groupName, currentUser?.avatar) }
+        if (pending.isNotEmpty()) {
+            messages = mergeGroupMessages(messages, pending, MessageSource.LocalOptimistic)
+        }
+    }
+
+    fun restoreCachedMessages() {
+        val cached = ChatLocalCache.loadGroup(context, groupId)
+            .map { it.toUiGroupMessage(currentUser?.id) }
+        if (cached.isNotEmpty()) {
+            messages = mergeGroupMessages(messages, cached, MessageSource.LocalCache)
+        }
+    }
+
+    suspend fun sendPendingGroupMessage(message: GroupMessageData) {
+        val localId = message.localId ?: message.backendId ?: return
+        val payload = message.pendingPayload ?: return
+        if (sendingLocalIds.contains(localId)) {
+            Log.d(
+                "ChatReliability",
+                "group_send_deduped groupId=$groupId clientId=$localId timestamp=${System.currentTimeMillis()}"
+            )
+            return
+        }
+        sendingLocalIds = sendingLocalIds + localId
+        ChatPendingOutbox.upsertGroup(context, groupId, localId, payload.toOutboxPayload())
+        updateLocalMessage(localId) {
+            it.copy(
+                status = MessageStatus.SENDING,
+                errorReason = null,
+                retryCount = it.retryCount + 1
+            )
+        }
+
+        var sendFailure: Throwable? = null
+        val response = when {
+            payload.mediaUri != null && payload.mimeType != null -> {
+                runCatching {
+                    groupRepository.sendGroupMediaMessage(
+                        context = context,
+                        groupId = groupId,
+                        uri = android.net.Uri.parse(payload.mediaUri),
+                        mimeType = payload.mimeType,
+                        replyToMessageId = payload.replyToMessageId,
+                        messageTypeOverride = payload.messageTypeOverride,
+                        clientId = localId
+                    )
+                }.onFailure { sendFailure = it }.getOrNull()
+            }
+            payload.text != null -> {
+                runCatching {
+                    groupRepository.sendGroupMessage(
+                        groupId = groupId,
+                        request = com.stugram.app.data.remote.model.SendChatMessageRequest(
+                            text = payload.text,
+                            replyToMessageId = payload.replyToMessageId,
+                            clientId = localId
+                        )
+                    )
+                }.onFailure { sendFailure = it }.getOrNull()
+            }
+            else -> null
+        }
+
+        val sent = response?.body()?.data
+        if (response?.isSuccessful == true && sent != null) {
+            val confirmed = if (sent.clientId.isNullOrBlank()) sent.copy(clientId = localId) else sent
+            ChatPendingOutbox.remove(context, localId)
+            ChatLocalCache.upsertGroup(context, groupId, listOf(confirmed), MessageSource.HttpResponse)
+            finalizeOptimisticMessage(localId, confirmed.toUiGroupMessage(currentUser?.id))
+            scope.launch { listState.animateScrollToItem(0) }
+        } else {
+            val errorMessage = when {
+                response == null -> sendFailure.chatSendErrorMessage()
+                response.code() == 401 -> "Session expired. Please sign in again."
+                else -> response.apiErrorMessage("Could not send message")
+            }
+            val status = if (response.shouldQueueForRetry()) MessageStatus.QUEUED else MessageStatus.FAILED
+            Log.w(
+                "ChatReliability",
+                "group_send_result groupId=$groupId clientId=$localId status=$status httpCode=${response?.code()} retryable=${response.shouldQueueForRetry()} errorCategory=${sendFailure.chatSendErrorCategory()} timestamp=${System.currentTimeMillis()}"
+            )
+            if (status == MessageStatus.FAILED) {
+                ChatPendingOutbox.remove(context, localId)
+            } else {
+                ChatPendingOutbox.markRetry(context, localId)
+                ChatOutboxScheduler.schedule(context)
+            }
+            updateLocalMessage(localId) {
+                it.copy(
+                    status = status,
+                    errorReason = errorMessage
+                )
+            }
+        }
+        sendingLocalIds = sendingLocalIds - localId
+    }
+
+    suspend fun flushPendingGroupMessages() {
+        val pending = ChatPendingOutbox.loadGroup(context, groupId)
+        if (pending.isEmpty()) return
+        val senderName = currentUser?.fullName ?: currentUser?.username ?: groupName
+        messages = mergeGroupMessages(messages, pending.map { it.toGroupUiMessage(senderName, currentUser?.avatar) }, MessageSource.LocalOptimistic)
+        pending.forEach { envelope ->
+            sendPendingGroupMessage(envelope.toGroupUiMessage(senderName, currentUser?.avatar))
+        }
     }
 
     var lastTypingSentAt by remember { mutableLongStateOf(0L) }
@@ -185,6 +369,16 @@ fun GroupChatDetailScreen(
                     chatSocketManager.sendTypingStart(groupId = groupId)
                     lastTypingSentAt = now
                 }
+            }
+        }
+    }
+
+    LaunchedEffect(messageText, groupId) {
+        if (groupId.isNotBlank() && messageText.isNotBlank()) {
+            delay(3500)
+            if (messageText.isNotBlank()) {
+                chatSocketManager.sendTypingStop(groupId = groupId)
+                lastTypingSentAt = 0L
             }
         }
     }
@@ -207,6 +401,7 @@ fun GroupChatDetailScreen(
             loadError = null
             return
         }
+        MessagesInboxCache.clearGroupUnread(groupId)
         if (append) isLoadingMore = true else isInitialLoading = true
         loadError = null
         runCatching {
@@ -217,21 +412,21 @@ fun GroupChatDetailScreen(
                 val newItems = body.data
                     .map { it.toUiGroupMessage(currentUser?.id) }
                     .filter { it.text.isNotBlank() || it.media != null || !it.replyPreview.isNullOrBlank() }
-                messages = if (append) mergeGroupMessages(messages, newItems) else mergeGroupMessages(emptyList(), newItems)
+                ChatLocalCache.upsertGroup(context, groupId, body.data, MessageSource.PaginationLoad)
+                messages = mergeGroupMessages(messages, newItems, MessageSource.PaginationLoad)
                 page = body.meta?.page ?: targetPage
                 totalPages = body.meta?.totalPages ?: 1
-                newItems.filter { !it.isMe && it.status != MessageStatus.READ }.forEach { item ->
+                newItems.filter { !it.isMe && it.status != MessageStatus.SEEN }.forEach { item ->
                     item.backendId?.let { messageId ->
                         runCatching { groupRepository.markGroupMessageSeen(groupId, messageId) }
                     }
                 }
+                MessagesInboxCache.clearGroupUnread(groupId)
             } else {
                 loadError = response.apiErrorMessage("Could not load group chat")
-                if (!append) messages = emptyList()
             }
         }.onFailure {
             loadError = it.message
-            if (!append) messages = emptyList()
         }
         isInitialLoading = false
         isLoadingMore = false
@@ -240,11 +435,15 @@ fun GroupChatDetailScreen(
     LaunchedEffect(groupId, currentUser?.id) {
         page = 1
         totalPages = 1
+        restoreCachedMessages()
+        mergePersistedPendingMessages()
         loadMessages(targetPage = 1, append = false)
         
         if (groupId.isNotBlank()) {
             chatSocketManager.connect()
             chatSocketManager.joinGroup(groupId)
+            MessagesInboxCache.clearGroupUnread(groupId)
+            flushPendingGroupMessages()
         }
     }
 
@@ -257,10 +456,19 @@ fun GroupChatDetailScreen(
             if (event is com.stugram.app.core.socket.SocketConnectionEvent.Reconnected) {
                 page = 1
                 totalPages = 1
+                flushPendingGroupMessages()
                 loadMessages(targetPage = 1, append = false)
                 groupRefreshNonce += 1
             }
         }
+    }
+
+    LaunchedEffect(messageText, draftKey) {
+        ChatPendingOutbox.saveDraft(context, draftKey, messageText)
+    }
+
+    LaunchedEffect(isAtLatest, messages.size) {
+        if (isAtLatest) unseenNewMessages = 0
     }
 
     LaunchedEffect(groupId) {
@@ -268,9 +476,16 @@ fun GroupChatDetailScreen(
         
         chatSocketManager.groupMessages.collect { (socketGroupId, socketMessage) ->
             if (socketGroupId == groupId) {
+                val wasAtLatest = isAtLatest
                 val uiMessage = socketMessage.toUiGroupMessage(currentUser?.id)
+                ChatLocalCache.upsertGroup(context, groupId, listOf(socketMessage), MessageSource.SocketEvent)
                 // Prevent duplicates
                 messages = mergeGroupMessages(messages, listOf(uiMessage))
+                if (uiMessage.isMe || wasAtLatest) {
+                    scope.launch { listState.animateScrollToItem(0) }
+                } else {
+                    unseenNewMessages += 1
+                }
             }
         }
     }
@@ -281,9 +496,23 @@ fun GroupChatDetailScreen(
         chatSocketManager.groupConversationUpdates.collect { updatedGroup ->
             if (updatedGroup.id == groupId) {
                 groupRefreshNonce += 1
-                page = 1
-                totalPages = 1
-                loadMessages(targetPage = 1, append = false)
+            }
+        }
+    }
+
+    LaunchedEffect(groupId) {
+        if (groupId.isBlank()) return@LaunchedEffect
+
+        chatSocketManager.messageDeliveredEvents.collect { event ->
+            if (event.groupId == groupId) {
+                val messageId = event.messageId ?: return@collect
+                messages = messages.map { message ->
+                    if (message.backendId == messageId && messageStatusRank(message.status) < messageStatusRank(MessageStatus.DELIVERED)) {
+                        message.copy(status = MessageStatus.DELIVERED)
+                    } else {
+                        message
+                    }
+                }
             }
         }
     }
@@ -293,6 +522,7 @@ fun GroupChatDetailScreen(
 
         chatSocketManager.groupMessageSeenEvents.collect { event ->
             if (event.groupId == groupId) {
+                ChatLocalCache.upsertGroup(context, groupId, listOf(event.message), MessageSource.SocketEvent)
                 messages = mergeGroupMessages(messages, listOf(event.message.toUiGroupMessage(currentUser?.id)))
             }
         }
@@ -303,6 +533,7 @@ fun GroupChatDetailScreen(
 
         chatSocketManager.groupMessageReactionEvents.collect { event ->
             if (event.groupId == groupId) {
+                ChatLocalCache.upsertGroup(context, groupId, listOf(event.message), MessageSource.SocketEvent)
                 messages = mergeGroupMessages(messages, listOf(event.message.toUiGroupMessage(currentUser?.id)))
             }
         }
@@ -313,6 +544,7 @@ fun GroupChatDetailScreen(
 
         chatSocketManager.groupMessageEditedEvents.collect { event ->
             if (event.groupId == groupId) {
+                ChatLocalCache.upsertGroup(context, groupId, listOf(event.message), MessageSource.SocketEvent)
                 messages = mergeGroupMessages(messages, listOf(event.message.toUiGroupMessage(currentUser?.id)))
             }
         }
@@ -323,6 +555,7 @@ fun GroupChatDetailScreen(
 
         chatSocketManager.groupMessageForwardedEvents.collect { event ->
             if (event.groupId == groupId) {
+                ChatLocalCache.upsertGroup(context, groupId, listOf(event.message), MessageSource.SocketEvent)
                 messages = mergeGroupMessages(messages, listOf(event.message.toUiGroupMessage(currentUser?.id)))
             }
         }
@@ -333,6 +566,7 @@ fun GroupChatDetailScreen(
 
         chatSocketManager.groupMessageDeletedForEveryoneEvents.collect { event ->
             if (event.groupId == groupId) {
+                ChatLocalCache.upsertGroup(context, groupId, listOf(event.message), MessageSource.SocketEvent)
                 messages = mergeGroupMessages(messages, listOf(event.message.toUiGroupMessage(currentUser?.id)))
             }
         }
@@ -344,9 +578,6 @@ fun GroupChatDetailScreen(
         chatSocketManager.groupMessagePinnedEvents.collect { event ->
             if (event.groupId == groupId) {
                 groupRefreshNonce += 1
-                page = 1
-                totalPages = 1
-                loadMessages(targetPage = 1, append = false)
             }
         }
     }
@@ -357,9 +588,6 @@ fun GroupChatDetailScreen(
         chatSocketManager.groupMessageUnpinnedEvents.collect { event ->
             if (event.groupId == groupId) {
                 groupRefreshNonce += 1
-                page = 1
-                totalPages = 1
-                loadMessages(targetPage = 1, append = false)
             }
         }
     }
@@ -369,6 +597,7 @@ fun GroupChatDetailScreen(
 
         chatSocketManager.groupMessageDeletedEvents.collect { event ->
             if (event.groupId == groupId) {
+                ChatLocalCache.removeGroup(context, groupId, event.messageId)
                 messages = messages.filterNot { it.backendId == event.messageId }
             }
         }
@@ -410,10 +639,7 @@ fun GroupChatDetailScreen(
 
         PushNotificationBus.events.collect { event ->
             if (event.groupId == groupId) {
-                page = 1
-                totalPages = 1
-                loadMessages(targetPage = 1, append = false)
-                groupRefreshNonce += 1
+                // Active group already receives socket updates; skip duplicate reloads.
             }
         }
     }
@@ -448,10 +674,30 @@ fun GroupChatDetailScreen(
         searchLoading = false
     }
 
+    val unseenIncomingGroupMessageKey = remember(messages) {
+        messages
+            .filter { !it.isMe && it.status != MessageStatus.SEEN }
+            .mapNotNull { it.backendId }
+            .distinct()
+            .joinToString("|")
+    }
+
+    LaunchedEffect(unseenIncomingGroupMessageKey) {
+        if (unseenIncomingGroupMessageKey.isNotBlank()) {
+            delay(180)
+            unseenIncomingGroupMessageKey.split("|")
+                .filter { it.isNotBlank() }
+                .forEach { messageId ->
+                    runCatching { groupRepository.markGroupMessageSeen(groupId, messageId) }
+                }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize().background(backgroundColor)) {
         val clipboardManager = LocalClipboardManager.current
+        val pinnedMessage = groupDetail?.pinnedMessage
         val firstUnreadIndex = remember(messages, currentUser?.id) {
-            messages.indexOfFirst { !it.isMe && it.status != MessageStatus.READ }
+            messages.indexOfFirst { !it.isMe && it.status != MessageStatus.SEEN }
         }
 
         Column(modifier = Modifier.fillMaxSize()) {
@@ -460,9 +706,14 @@ fun GroupChatDetailScreen(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
                     reverseLayout = true,
-                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = headerHeight + 10.dp, bottom = 12.dp)
+                    contentPadding = PaddingValues(
+                        start = 12.dp,
+                        end = 12.dp,
+                        top = if (pinnedMessage != null) pinnedBannerTop + 46.dp else headerHeight + 8.dp,
+                        bottom = 12.dp
+                    )
                 ) {
-                    if (isInitialLoading) {
+                    if (isInitialLoading && messages.isEmpty()) {
                         item("loading") {
                             Box(
                                 modifier = Modifier
@@ -482,7 +733,7 @@ fun GroupChatDetailScreen(
                             )
                         }
                     }
-                    itemsIndexed(messages, key = { _, msg -> msg.backendId ?: msg.id.toString() }) { index, message ->
+                    itemsIndexed(messages, key = { _, msg -> msg.stableKeyVm }) { index, message ->
                         val isSameDay = if (index > 0) {
                             isSameDay(message.timestamp, messages[index - 1].timestamp)
                         } else false
@@ -500,12 +751,14 @@ fun GroupChatDetailScreen(
                                 currentUser?.id,
                                 accentBlue,
                                 highlighted = message.backendId != null && message.backendId == highlightedMessageId,
-                                onTap = {
-                                    selectedMessageForActions = message
+                                onRetry = {
+                                    scope.launch { sendPendingGroupMessage(message) }
                                 },
+                                onTap = { },
                                 onLongPress = {
                                     selectedMessageForActions = message
                                 },
+                                onNavigateToPost = onNavigateToPost,
                                 onGloballyPositioned = { coords ->
                                     message.backendId?.let { backendId ->
                                         messageBounds = messageBounds + (backendId to coords.boundsInWindow())
@@ -516,6 +769,29 @@ fun GroupChatDetailScreen(
                     }
                 }
 
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 24.dp)
+                ) {
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = unseenNewMessages > 0 && !isAtLatest,
+                        enter = fadeIn(tween(120)) + slideInVertically(tween(160)) { it / 2 },
+                        exit = fadeOut(tween(100)) + slideOutVertically(tween(120)) { it / 2 }
+                    ) {
+                        JumpToLatestChip(
+                            count = unseenNewMessages,
+                            isDarkMode = isDarkMode,
+                            onClick = {
+                                scope.launch {
+                                    listState.animateScrollToItem(0)
+                                    unseenNewMessages = 0
+                                }
+                            }
+                        )
+                    }
+                }
+
                 // --- TOP AREA (Liquid Glass Header) ---
                 Box(
                     modifier = Modifier
@@ -523,8 +799,8 @@ fun GroupChatDetailScreen(
                         .height(headerHeight)
                 ) {
                     val glassTint = if (isDarkMode) Color.Black else Color.White
-                    val blurMaskStart = if (isDarkMode) Color.Black.copy(alpha = 0.98f) else Color.White.copy(alpha = 0.94f)
-                    val blurMaskMid = if (isDarkMode) Color.Black.copy(alpha = 0.9f) else Color.White.copy(alpha = 0.88f)
+                    val blurMaskStart = if (isDarkMode) Color.Black.copy(alpha = 0.995f) else Color.White.copy(alpha = 0.98f)
+                    val blurMaskMid = if (isDarkMode) Color.Black.copy(alpha = 0.96f) else Color.White.copy(alpha = 0.94f)
 
                     // 1. Background with gradient blur (Thicker at top, invisible border at bottom)
                     Box(
@@ -562,7 +838,7 @@ fun GroupChatDetailScreen(
                             .background(
                                 Brush.verticalGradient(
                                     0.0f to glassTint.copy(alpha = if (isDarkMode) 0.22f else 0.16f),
-                                    0.6f to glassTint.copy(alpha = if (isDarkMode) 0.1f else 0.07f),
+                                    0.6f to glassTint.copy(alpha = if (isDarkMode) 0.34f else 0.28f),
                                     1.0f to Color.Transparent
                                 )
                             )
@@ -583,89 +859,103 @@ fun GroupChatDetailScreen(
                             .padding(horizontal = 16.dp, vertical = 8.dp)
                             .height(headerContentHeight)
                     ) {
-                        Box(
+                        TelegramIosGlass(
                             modifier = Modifier
                                 .align(Alignment.CenterStart)
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(contentColor.copy(alpha = 0.06f))
-                                .clickable { onBack() },
+                                .size(44.dp),
+                            shape = CircleShape,
+                            isDarkMode = isDarkMode,
+                            onClick = onBack,
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = contentColor, modifier = Modifier.size(22.dp))
                         }
 
-                        Column(
+                        TelegramIosGlass(
                             modifier = Modifier
                                 .align(Alignment.Center)
-                                .clickable { showGroupInfo = true }
-                                .padding(horizontal = 20.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
+                                .wrapContentWidth()
+                                .height(46.dp),
+                            shape = RoundedCornerShape(23.dp),
+                            isDarkMode = isDarkMode,
+                            onClick = { showGroupInfo = true },
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = groupDetail?.name ?: groupName, 
-                                color = contentColor, 
-                                fontWeight = FontWeight.Bold, 
-                                fontSize = 15.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = if (isTyping) {
-                                    if (!typingUser.isNullOrBlank()) "$typingUser is typing..." else "Someone is typing..."
-                                } else {
-                                    "${groupDetail?.membersCount ?: 0} members"
-                                }, 
-                                color = if (isTyping) Color(0xFF007AFF) else accentBlue,
-                                fontSize = 11.sp, 
-                                fontWeight = FontWeight.Medium
-                            )
+                            Column(
+                                modifier = Modifier.padding(horizontal = 22.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text(
+                                    text = groupDetail?.name ?: groupName,
+                                    color = contentColor,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 15.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = if (isTyping) {
+                                        if (!typingUser.isNullOrBlank()) "$typingUser is typing..." else "Someone is typing..."
+                                    } else {
+                                        buildString {
+                                            append("${groupDetail?.membersCount ?: 0} members")
+                                            if (onlineMembersCount > 0) {
+                                                append(" • $onlineMembersCount online")
+                                            }
+                                        }
+                                    },
+                                    color = if (isTyping || onlineMembersCount > 0) Color(0xFF00C853) else accentBlue,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
                         }
 
-                        Box(
+                        TelegramIosGlass(
                             modifier = Modifier
                                 .align(Alignment.CenterEnd)
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(contentColor.copy(alpha = 0.06f))
-                                .clickable { showGroupInfo = true },
+                                .size(44.dp),
+                            shape = CircleShape,
+                            isDarkMode = isDarkMode,
+                            onClick = { showGroupInfo = true },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(Icons.Default.Groups, null, tint = contentColor.copy(0.8f), modifier = Modifier.size(24.dp))
                         }
                     }
-                }
-            }
 
-            AnimatedVisibility(
-                visible = groupDetail?.pinnedMessage != null,
-                enter = fadeIn(tween(120)) + expandVertically(tween(120)),
-                exit = fadeOut(tween(120)) + shrinkVertically(tween(120)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = headerHeight + 10.dp, start = 12.dp, end = 12.dp)
-            ) {
-                groupDetail?.pinnedMessage?.let { pinned ->
-                    PinnedMessageBanner(
-                        title = pinned.sender?.fullName?.takeIf { it.isNotBlank() } ?: pinned.sender?.username ?: "Pinned message",
-                        text = pinned.text?.takeIf { it.isNotBlank() }
-                            ?: pinned.replyToMessage?.text
-                            ?: if (pinned.media != null) "Media message" else "Pinned content",
-                        isDarkMode = isDarkMode,
-                        onClick = {
-                            val targetId = pinned.id
-                            val index = messages.indexOfFirst { it.backendId == targetId }
-                            if (index >= 0) {
-                                highlightedMessageId = targetId
-                                scope.launch {
-                                    listState.animateScrollToItem(index)
-                                    delay(1000)
-                                    if (highlightedMessageId == targetId) highlightedMessageId = null
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = pinnedMessage != null,
+                        enter = fadeIn(tween(120)) + expandVertically(tween(120)),
+                        exit = fadeOut(tween(120)) + shrinkVertically(tween(120)),
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .padding(top = pinnedBannerTop, start = 12.dp, end = 12.dp)
+                    ) {
+                        pinnedMessage?.let { pinned ->
+                            PinnedMessageBanner(
+                                title = pinned.sender?.fullName?.takeIf { it.isNotBlank() } ?: pinned.sender?.username ?: "Pinned message",
+                                text = pinned.text?.takeIf { it.isNotBlank() }
+                                    ?: pinned.replyToMessage?.text
+                                    ?: if (pinned.media != null) "Media message" else "Pinned content",
+                                isDarkMode = isDarkMode,
+                                onClick = {
+                                    val targetId = pinned.id
+                                    val index = messages.indexOfFirst { it.backendId == targetId }
+                                    if (index >= 0) {
+                                        highlightedMessageId = targetId
+                                        scope.launch {
+                                            listState.animateScrollToItem(index)
+                                            delay(1000)
+                                            if (highlightedMessageId == targetId) highlightedMessageId = null
+                                        }
+                                    }
                                 }
-                            }
+                            )
                         }
-                    )
+                    }
                 }
             }
 
@@ -718,50 +1008,33 @@ fun GroupChatDetailScreen(
                         }
                     } else if (messageText.isNotBlank() && groupId.isNotBlank()) {
                         val text = messageText.trim()
-                        val tempBackendId = "local-${UUID.randomUUID()}"
                         val replyTargetId = replyingToMessage?.backendId
+                        if (!acceptGroupOutgoingFingerprint("text:${replyTargetId.orEmpty()}:$text")) return@RichChatComposer
+                        val localId = "local-${UUID.randomUUID()}"
                         val optimistic = buildOptimisticMessage(
-                            tempBackendId = tempBackendId,
+                            localId = localId,
                             text = text,
                             senderName = currentUser?.fullName ?: currentUser?.username ?: groupName,
                             senderAvatar = currentUser?.avatar,
-                            replyPreview = replyingToMessage?.text?.takeIf { value -> value.isNotBlank() } ?: replyingToMessage?.replyPreview
+                            replyPreview = replyingToMessage?.text?.takeIf { value -> value.isNotBlank() } ?: replyingToMessage?.replyPreview,
+                            pendingPayload = PendingMessagePayload(
+                                text = text,
+                                replyToMessageId = replyTargetId
+                            )
                         )
-                        messages = mergeGroupMessages(messages, listOf(optimistic))
+                        messages = mergeGroupMessages(messages, listOf(optimistic), MessageSource.LocalOptimistic)
                         messageText = ""
                         replyingToMessage = null
                         scope.launch { listState.animateScrollToItem(0) }
-                        scope.launch {
-                            val response = runCatching {
-                                groupRepository.sendGroupMessage(
-                                    groupId = groupId,
-                                    request = com.stugram.app.data.remote.model.SendChatMessageRequest(
-                                        text = text,
-                                        replyToMessageId = replyTargetId
-                                    )
-                                )
-                            }.getOrNull()
-                            val sent = response?.body()?.data
-                            if (response?.isSuccessful == true && sent != null) {
-                                finalizeOptimisticMessage(tempBackendId, sent.toUiGroupMessage(currentUser?.id))
-                                scope.launch { listState.animateScrollToItem(0) }
-                            } else {
-                                removeOptimisticMessage(tempBackendId)
-                                val errorMessage = when {
-                                    response == null -> "Could not send message"
-                                    response.code() == 401 -> "Session expired. Please sign in again."
-                                    else -> response.apiErrorMessage("Could not send message")
-                                }
-                                Toast.makeText(context, errorMessage, Toast.LENGTH_SHORT).show()
-                            }
-                        }
+                        scope.launch { sendPendingGroupMessage(optimistic) }
                     }
                 },
                 onSendMedia = { uri, mimeType, messageTypeOverride, replyId ->
-                    val tempBackendId = "local-${UUID.randomUUID()}"
+                    if (!acceptGroupOutgoingFingerprint("media:${replyId.orEmpty()}:$uri:$mimeType")) return@RichChatComposer true
+                    val localId = "local-${UUID.randomUUID()}"
                     val optimisticMessageType = messageTypeOverride ?: if (mimeType.startsWith("video")) "video" else "image"
                     val optimistic = buildOptimisticMessage(
-                        tempBackendId = tempBackendId,
+                        localId = localId,
                         text = "",
                         senderName = currentUser?.fullName ?: currentUser?.username ?: groupName,
                         senderAvatar = currentUser?.avatar,
@@ -773,66 +1046,39 @@ fun GroupChatDetailScreen(
                                 ?: if (mimeType.startsWith("video")) "Video" else "Image",
                             mimeType = mimeType
                         ),
-                        replyPreview = replyingToMessage?.text?.takeIf { value -> value.isNotBlank() } ?: replyingToMessage?.replyPreview
+                        replyPreview = replyingToMessage?.text?.takeIf { value -> value.isNotBlank() } ?: replyingToMessage?.replyPreview,
+                        pendingPayload = PendingMessagePayload(
+                            mediaUri = uri.toString(),
+                            mimeType = mimeType,
+                            replyToMessageId = replyId,
+                            messageTypeOverride = messageTypeOverride
+                        )
                     )
-                    messages = mergeGroupMessages(messages, listOf(optimistic))
+                    messages = mergeGroupMessages(messages, listOf(optimistic), MessageSource.LocalOptimistic)
                     replyingToMessage = null
                     scope.launch { listState.animateScrollToItem(0) }
-                    val response = runCatching {
-                        groupRepository.sendGroupMediaMessage(context, groupId, uri, mimeType, replyId, messageTypeOverride)
-                    }.getOrNull()
-                    val sent = response?.body()?.data
-                    if (response?.isSuccessful == true && sent != null) {
-                        finalizeOptimisticMessage(tempBackendId, sent.toUiGroupMessage(currentUser?.id))
-                        scope.launch { listState.animateScrollToItem(0) }
-                        true
-                    } else {
-                        removeOptimisticMessage(tempBackendId)
-                        val errorMessage = when {
-                            response == null -> "Could not send media"
-                            response.code() == 401 -> "Session expired. Please sign in again."
-                            else -> response.apiErrorMessage("Could not send media")
-                        }
-                        Toast.makeText(context, errorMessage, Toast.LENGTH_SHORT).show()
-                        false
-                    }
+                    scope.launch { sendPendingGroupMessage(optimistic) }
+                    true
                 },
                 onSendStructured = { structuredText, replyId ->
-                    val tempBackendId = "local-${UUID.randomUUID()}"
+                    if (!acceptGroupOutgoingFingerprint("structured:${replyId.orEmpty()}:$structuredText")) return@RichChatComposer true
+                    val localId = "local-${UUID.randomUUID()}"
                     val optimistic = buildOptimisticMessage(
-                        tempBackendId = tempBackendId,
+                        localId = localId,
                         text = structuredText,
                         senderName = currentUser?.fullName ?: currentUser?.username ?: groupName,
                         senderAvatar = currentUser?.avatar,
-                        replyPreview = replyingToMessage?.text?.takeIf { value -> value.isNotBlank() } ?: replyingToMessage?.replyPreview
+                        replyPreview = replyingToMessage?.text?.takeIf { value -> value.isNotBlank() } ?: replyingToMessage?.replyPreview,
+                        pendingPayload = PendingMessagePayload(
+                            text = structuredText,
+                            replyToMessageId = replyId
+                        )
                     )
-                    messages = mergeGroupMessages(messages, listOf(optimistic))
+                    messages = mergeGroupMessages(messages, listOf(optimistic), MessageSource.LocalOptimistic)
                     replyingToMessage = null
                     scope.launch { listState.animateScrollToItem(0) }
-                    val response = runCatching {
-                        groupRepository.sendGroupMessage(
-                            groupId = groupId,
-                            request = com.stugram.app.data.remote.model.SendChatMessageRequest(
-                                text = structuredText,
-                                replyToMessageId = replyId
-                            )
-                        )
-                    }.getOrNull()
-                    val sent = response?.body()?.data
-                    if (response?.isSuccessful == true && sent != null) {
-                        finalizeOptimisticMessage(tempBackendId, sent.toUiGroupMessage(currentUser?.id))
-                        scope.launch { listState.animateScrollToItem(0) }
-                        true
-                    } else {
-                        removeOptimisticMessage(tempBackendId)
-                        val errorMessage = when {
-                            response == null -> "Could not send message"
-                            response.code() == 401 -> "Session expired. Please sign in again."
-                            else -> response.apiErrorMessage("Could not send message")
-                        }
-                        Toast.makeText(context, errorMessage, Toast.LENGTH_SHORT).show()
-                        false
-                    }
+                    scope.launch { sendPendingGroupMessage(optimistic) }
+                    true
                 },
                 replyToMessageId = replyingToMessage?.backendId,
                 sendEnabled = groupId.isNotBlank(),
@@ -1086,8 +1332,10 @@ private fun GroupMessageBubble(
     currentUserId: String?,
     accentBlue: Color,
     highlighted: Boolean = false,
+    onRetry: () -> Unit,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
+    onNavigateToPost: (String) -> Unit = {},
     onGloballyPositioned: (androidx.compose.ui.layout.LayoutCoordinates) -> Unit = {}
 ) {
     val alignment = if (message.isMe) Alignment.End else Alignment.Start
@@ -1128,43 +1376,52 @@ private fun GroupMessageBubble(
                 Surface(color = bubbleColor, shape = shape, border = highlightedBorder) {
                     Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                         if (message.deletedGloballyAt != null) {
-                            Text(
-                                text = "This message was deleted",
-                                color = textColor.copy(alpha = 0.62f),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Icon(Icons.Default.Block, null, tint = textColor.copy(alpha = 0.5f), modifier = Modifier.size(14.dp))
+                                Text(
+                                    text = "This message was deleted",
+                                    color = textColor.copy(alpha = 0.62f),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
                         } else {
                         if (!message.replyPreview.isNullOrBlank()) {
-                            Text(
+                            MessageContextPill(
                                 text = message.replyPreview,
-                                color = textColor.copy(alpha = 0.65f),
-                                fontSize = 12.sp,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .padding(bottom = 4.dp)
-                                    .border(0.5.dp, textColor.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
-                                .padding(horizontal = 8.dp, vertical = 5.dp)
-                            )
-                        }
-                        if (message.forwardedFromMessageId != null) {
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                text = "Forwarded message",
-                                color = textColor.copy(alpha = 0.52f),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
+                                icon = Icons.Default.Reply,
+                                textColor = textColor,
+                                accentColor = PremiumBlue,
                                 modifier = Modifier.padding(bottom = 4.dp)
                             )
                         }
-                        ChatMessageContent(
-                            text = message.text,
-                            messageType = message.messageType,
-                            media = message.media,
-                            isDarkMode = isDarkMode,
-                            preferLightContent = message.isMe
-                        )
+                        if (message.forwardedFromMessageId != null) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            ) {
+                                Icon(Icons.Default.NearMe, null, tint = textColor.copy(alpha = 0.5f), modifier = Modifier.size(12.dp))
+                                Text(
+                                    text = "Forwarded message",
+                                    color = textColor.copy(alpha = 0.52f),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    ChatMessageContent(
+                        text = message.text,
+                        messageType = message.messageType,
+                        media = message.media,
+                        isDarkMode = isDarkMode,
+                        preferLightContent = message.isMe,
+                        onOpenStructured = { payload ->
+                            if ((payload.type == ChatStructuredType.POST || payload.type == ChatStructuredType.REEL) && !payload.targetId.isNullOrBlank()) {
+                                onNavigateToPost(payload.targetId)
+                            }
+                        }
+                    )
                         if (message.reactions.isNotEmpty()) {
                             Spacer(Modifier.height(8.dp))
                             ReactionSummaryRow(
@@ -1176,33 +1433,40 @@ private fun GroupMessageBubble(
                         }
                         if (message.editedAt != null) {
                             Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = "edited",
-                                color = textColor.copy(alpha = 0.45f),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Medium
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Icon(Icons.Default.Edit, null, tint = textColor.copy(alpha = 0.42f), modifier = Modifier.size(10.dp))
+                                Text(
+                                    text = "edited",
+                                    color = textColor.copy(alpha = 0.45f),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
                         }
+                        MessageLifecycleStrip(message.status, message.media != null, textColor, PremiumBlue)
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                             horizontalArrangement = Arrangement.End,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(message.timestamp)),
-                                color = textColor.copy(alpha = 0.5f),
-                                fontSize = 10.sp
+                            MessageStatusFooter(
+                                status = message.status,
+                                timeString = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(message.timestamp)),
+                                isMe = message.isMe,
+                                textColor = textColor,
+                                accentColor = PremiumBlue,
+                                onRetry = onRetry,
+                                isGroupMessage = true
                             )
-                            if (message.isMe) {
-                                Spacer(Modifier.width(3.dp))
-                                Icon(
-                                    imageVector = if (message.status == MessageStatus.READ) Icons.Default.DoneAll else Icons.Default.Done,
-                                    contentDescription = null,
-                                    tint = if (message.status == MessageStatus.READ) Color(0xFF4CAF50) else textColor.copy(alpha = 0.5f),
-                                    modifier = Modifier.size(13.dp)
-                                )
-                            }
+                        }
+                        if (message.status == MessageStatus.FAILED && !message.errorReason.isNullOrBlank()) {
+                            Text(
+                                text = message.errorReason,
+                                color = Color(0xFFFF8A80),
+                                fontSize = 10.sp,
+                                lineHeight = 12.sp
+                            )
                         }
                     }
                 }
@@ -1355,6 +1619,11 @@ private fun GroupMemberRow(member: GroupMemberModel, isDarkMode: Boolean) {
 
 private fun ChatMessageModel.toUiGroupMessage(currentUserId: String?): GroupMessageData {
     val isMine = currentUserId != null && sender?.id == currentUserId
+    val seen = if (isMine) {
+        readAt != null || seenBy.any { it != currentUserId }
+    } else {
+        currentUserId != null && seenBy.any { it == currentUserId }
+    }
     val replyPreviewText = replyToMessage?.text
         ?: if (replyToMessage?.media != null) {
             when (replyToMessage.messageType) {
@@ -1368,13 +1637,18 @@ private fun ChatMessageModel.toUiGroupMessage(currentUserId: String?): GroupMess
     val messageTextValue = text?.takeIf { it.isNotBlank() } ?: ""
     return GroupMessageData(
         id = id.hashCode(),
+        localId = clientId,
         backendId = id,
         text = messageTextValue,
         senderName = sender?.fullName?.takeIf { it.isNotBlank() } ?: sender?.username ?: "Unknown member",
         senderAvatar = sender?.avatar,
         isMe = isMine,
         timestamp = createdAt.toGroupEpochMillis(),
-        status = if (currentUserId != null && seenBy.any { it == currentUserId }) MessageStatus.READ else MessageStatus.SENT,
+        status = when {
+            seen -> MessageStatus.SEEN
+            deliveredAt != null -> MessageStatus.DELIVERED
+            else -> MessageStatus.SENT
+        },
         messageType = messageType,
         media = media?.let {
             ChatMediaUi(
@@ -1413,6 +1687,7 @@ private fun String?.toGroupEpochMillis(): Long {
 
 data class GroupMessageData(
     val id: Int,
+    val localId: String? = null,
     val backendId: String? = null,
     val text: String,
     val senderName: String,
@@ -1420,8 +1695,11 @@ data class GroupMessageData(
     val isMe: Boolean,
     val timestamp: Long = System.currentTimeMillis(),
     val status: MessageStatus = MessageStatus.SENT,
+    val errorReason: String? = null,
+    val retryCount: Int = 0,
     val messageType: String = "text",
     val media: ChatMediaUi? = null,
+    val pendingPayload: PendingMessagePayload? = null,
     val replyPreview: String? = null,
     val reactions: List<MessageReactionUi> = emptyList(),
     val forwardedFromMessageId: String? = null,
@@ -1433,27 +1711,87 @@ data class GroupMessageData(
     val deletedGloballyAt: String? = null
 )
 
-private fun GroupMessageData.mergeFrom(other: GroupMessageData): GroupMessageData {
+private fun PendingChatEnvelope.toGroupUiMessage(senderName: String, senderAvatar: String?): GroupMessageData {
+    val mediaType = payload.messageTypeOverride ?: when {
+        payload.mimeType?.startsWith("video") == true -> "video"
+        payload.mimeType?.startsWith("audio") == true -> "voice"
+        payload.mediaUri != null -> "image"
+        else -> "text"
+    }
+    return GroupMessageData(
+        id = localId.hashCode(),
+        localId = localId,
+        backendId = null,
+        text = payload.text.orEmpty(),
+        senderName = senderName,
+        senderAvatar = senderAvatar,
+        isMe = true,
+        timestamp = createdAt,
+        status = if (terminalError.isNullOrBlank()) MessageStatus.QUEUED else MessageStatus.FAILED,
+        errorReason = terminalError,
+        retryCount = retryCount,
+        messageType = mediaType,
+        media = payload.mediaUri?.let {
+            ChatMediaUi(
+                url = it,
+                type = mediaType,
+                fileName = if (mediaType == "video") "Video" else if (mediaType == "voice") "Voice message" else "Photo",
+                mimeType = payload.mimeType
+            )
+        },
+        pendingPayload = payload.toPendingMessagePayload()
+    )
+}
+
+private fun GroupMessageData.mergeFrom(other: GroupMessageData, incomingSource: MessageSource = MessageSource.SocketEvent): GroupMessageData {
+    val result = ChatReducer.merge(
+        toReducerSnapshot(MessageSource.LocalCache),
+        other.toReducerSnapshot(incomingSource)
+    )
+    val reduced = result.message
+    val otherIsServer = other.backendId != null
     return copy(
-        text = other.text.takeIf { it.isNotBlank() } ?: text,
+        localId = reduced.localId,
+        backendId = reduced.backendId,
+        text = if (result.textFromIncoming) other.text.takeIf { it.isNotBlank() } ?: text else text,
         senderName = other.senderName.ifBlank { senderName },
         senderAvatar = other.senderAvatar ?: senderAvatar,
         isMe = isMe || other.isMe,
-        timestamp = minOf(timestamp, other.timestamp).takeIf { it > 0 } ?: other.timestamp,
-        status = if (status == MessageStatus.READ || other.status == MessageStatus.READ) MessageStatus.READ else other.status,
+        timestamp = reduced.timestamp,
+        status = reduced.status.toUiStatus(),
+        errorReason = reduced.errorReason,
+        retryCount = reduced.retryCount,
         messageType = if (other.messageType.isNotBlank()) other.messageType else messageType,
         media = other.media ?: media,
-        replyPreview = other.replyPreview ?: replyPreview,
-        reactions = if (other.reactions.isNotEmpty()) other.reactions else reactions,
-        forwardedFromMessageId = other.forwardedFromMessageId ?: forwardedFromMessageId,
-        forwardedFromSenderId = other.forwardedFromSenderId ?: forwardedFromSenderId,
-        forwardedFromConversationId = other.forwardedFromConversationId ?: forwardedFromConversationId,
-        forwardedAt = other.forwardedAt ?: forwardedAt,
+        pendingPayload = other.pendingPayload ?: pendingPayload,
+        replyPreview = if (result.textFromIncoming) other.replyPreview ?: replyPreview else replyPreview,
+        reactions = if (result.reactionsFromIncoming) other.reactions else if (!otherIsServer && other.reactions.isNotEmpty()) other.reactions else reactions,
+        forwardedFromMessageId = if (otherIsServer) other.forwardedFromMessageId else other.forwardedFromMessageId ?: forwardedFromMessageId,
+        forwardedFromSenderId = if (otherIsServer) other.forwardedFromSenderId else other.forwardedFromSenderId ?: forwardedFromSenderId,
+        forwardedFromConversationId = if (otherIsServer) other.forwardedFromConversationId else other.forwardedFromConversationId ?: forwardedFromConversationId,
+        forwardedAt = if (otherIsServer) other.forwardedAt else other.forwardedAt ?: forwardedAt,
         readAt = other.readAt ?: readAt,
-        editedAt = other.editedAt ?: editedAt,
+        editedAt = if (result.editFromIncoming) other.editedAt ?: editedAt else editedAt,
         deletedGloballyAt = other.deletedGloballyAt ?: deletedGloballyAt
     )
 }
+
+private fun GroupMessageData.toReducerSnapshot(source: MessageSource): ChatMessageSnapshot =
+    ChatMessageSnapshot(
+        localId = localId,
+        clientId = localId,
+        backendId = backendId,
+        text = text,
+        status = status.toReducerStatus(),
+        source = source,
+        timestamp = timestamp,
+        editedAt = editedAt.toEpochMillisOrNull(),
+        deletedAt = deletedGloballyAt.toEpochMillisOrNull(),
+        reactions = reactions.map { "${it.userId.orEmpty()}:${it.emoji}" },
+        hasReactionSnapshot = backendId != null && source != MessageSource.LocalCache,
+        errorReason = errorReason,
+        retryCount = retryCount
+    )
 
 private fun retrofit2.Response<*>?.apiErrorMessage(defaultMessage: String): String {
     val response = this ?: return defaultMessage

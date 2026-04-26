@@ -14,8 +14,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -135,6 +140,11 @@ private enum class EditSelectionSheet {
     Group
 }
 
+private fun String?.normalizedRemoteImageUrl(): String? =
+    this?.trim()?.takeIf {
+        it.isNotBlank() && it.lowercase() !in setOf("false", "true", "null", "undefined")
+    }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditProfileScreen(
@@ -185,8 +195,8 @@ fun EditProfileScreen(
         school = currentUser?.school.orEmpty()
         grade = currentUser?.grade.orEmpty()
         group = currentUser?.group.orEmpty()
-        avatarUrl = currentUser?.avatar
-        bannerUrl = currentUser?.banner
+        avatarUrl = currentUser?.avatar.normalizedRemoteImageUrl()
+        bannerUrl = currentUser?.banner.normalizedRemoteImageUrl()
         avatarPreviewUri = null
         bannerPreviewUri = null
     }
@@ -212,7 +222,7 @@ fun EditProfileScreen(
                     when (val outcome = response.toUploadOutcome("Avatar upload failed")) {
                         is UploadOutcome.Success -> {
                             tokenManager.updateCurrentUser(outcome.data)
-                            avatarUrl = outcome.data.avatar
+                            avatarUrl = outcome.data.avatar.normalizedRemoteImageUrl()
                             avatarPreviewUri = null
                             snackbarHostState.showSnackbar(outcome.message ?: "Avatar updated")
                         }
@@ -242,7 +252,7 @@ fun EditProfileScreen(
                     when (val outcome = response.toUploadOutcome("Banner upload failed")) {
                         is UploadOutcome.Success -> {
                             tokenManager.updateCurrentUser(outcome.data)
-                            bannerUrl = outcome.data.banner
+                            bannerUrl = outcome.data.banner.normalizedRemoteImageUrl()
                             bannerPreviewUri = null
                             snackbarHostState.showSnackbar(outcome.message ?: "Banner updated")
                         }
@@ -366,6 +376,7 @@ fun EditProfileScreen(
 
     Scaffold(
         containerColor = backgroundColor,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             CenterAlignedTopAppBar(
@@ -388,7 +399,8 @@ fun EditProfileScreen(
                     containerColor = backgroundColor,
                     titleContentColor = contentColor,
                     navigationIconContentColor = contentColor
-                )
+                ),
+                windowInsets = WindowInsets.statusBars
             )
         }
     ) { padding ->
@@ -396,6 +408,8 @@ fun EditProfileScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .consumeWindowInsets(padding)
+                .imePadding()
                 .verticalScroll(rememberScrollState())
         ) {
             Box(
@@ -597,7 +611,8 @@ fun EditProfileScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(50.dp))
+            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.navigationBarsPadding())
         }
     }
 }

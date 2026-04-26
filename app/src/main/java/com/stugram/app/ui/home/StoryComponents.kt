@@ -94,7 +94,7 @@ fun PremiumStoryTrayCard(
         Box(
             modifier = Modifier
                 .width(94.dp)
-                .height(156.dp)
+                .height(125.dp)
                 .graphicsLayer(scaleX = scale, scaleY = scale)
                 .clip(shape)
                 .border(2.dp, borderColor, shape)
@@ -233,6 +233,8 @@ fun StoryViewerModal(
     var currentStoryProgress by remember(pagerState.currentPage, currentStoryIndex) { mutableFloatStateOf(0f) }
     val isPaused = remember { mutableStateOf(false) }
 
+    val insightsVisible by rememberUpdatedState(showInsightsSheet)
+
     LaunchedEffect(pagerState.currentPage, currentStoryIndex) {
         currentStory?.backendId?.let { 
             onMarkSeen(it)
@@ -244,12 +246,16 @@ fun StoryViewerModal(
         
         currentStoryProgress = 0f
         while (currentStoryProgress < 1f) {
-            if (!isPaused.value && !showInsightsSheet) {
+            if (!isPaused.value && !insightsVisible) {
                 delay(50)
                 currentStoryProgress += 0.01f
             } else {
                 delay(100)
             }
+        }
+
+        while (isPaused.value || insightsVisible) {
+            delay(100)
         }
 
         // Navigate to next story or next profile

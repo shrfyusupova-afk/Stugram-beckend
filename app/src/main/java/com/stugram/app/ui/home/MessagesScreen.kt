@@ -44,10 +44,14 @@ import androidx.compose.ui.platform.LocalContext
 import com.stugram.app.core.socket.ChatSocketManager
 import com.stugram.app.core.storage.TokenManager
 import com.stugram.app.data.remote.RetrofitClient
+import com.stugram.app.data.remote.model.DirectConversationModel
+import com.stugram.app.data.remote.model.GroupConversationModel
+import com.stugram.app.data.remote.model.ProfileSummary
 import com.stugram.app.data.repository.ChatRepository
 import com.stugram.app.data.repository.FollowRepository
 import com.stugram.app.data.repository.GroupChatRepository
 import com.stugram.app.data.repository.MessagesInboxCache
+import com.stugram.app.data.repository.ProfileRepository
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -60,6 +64,7 @@ fun MessagesScreen(
     onBack: () -> Unit,
     onNavigateToChat: (String, String, Boolean) -> Unit,
     onNavigateToGroupChat: (String, String) -> Unit,
+    onNavigateToProfile: (String) -> Unit = {},
     onNavigateToPost: (String) -> Unit = {},
     isRefreshing: Boolean = false,
     onRefresh: () -> Unit = {}
@@ -73,6 +78,7 @@ fun MessagesScreen(
     }
     val groupChatRepository = remember { GroupChatRepository() }
     val followRepository = remember { FollowRepository() }
+    val profileRepository = remember { ProfileRepository() }
     // Background color: dark at night, light during the day
     val backgroundColor = if (isDarkMode) Color(0xFF0F0F0F) else Color(0xFFF2F2F2)
     val contentColor = if (isDarkMode) Color.White else Color.Black
@@ -81,17 +87,46 @@ fun MessagesScreen(
 
     var selectedSection by remember { mutableIntStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
-    var searchLoading by remember { mutableStateOf(false) }
-    var chatSearchResults by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var inboxRefreshNonce by remember { mutableIntStateOf(0) }
+    var isInboxRefreshing by remember { mutableStateOf(false) }
     var chatsLoading by remember { mutableStateOf(MessagesInboxCache.chats.value.isEmpty()) }
     var groupsLoading by remember { mutableStateOf(MessagesInboxCache.groups.value.isEmpty()) }
     var requestsLoading by remember { mutableStateOf(MessagesInboxCache.requests.value.isEmpty()) }
+    var suggestionsLoading by remember { mutableStateOf(MessagesInboxCache.suggestedProfiles.value.isEmpty()) }
+    var processingRequestIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var openingSuggestionIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var requestActionError by remember { mutableStateOf<String?>(null) }
+    var showComposerActions by remember { mutableStateOf(false) }
+    var showGroupCreate by remember { mutableStateOf(false) }
+    var suggestedProfiles by remember { mutableStateOf(MessagesInboxCache.suggestedProfiles.value) }
 
     val scope = rememberCoroutineScope()
     val cachedChats by MessagesInboxCache.chats.collectAsState()
     val cachedGroups by MessagesInboxCache.groups.collectAsState()
     val cachedRequests by MessagesInboxCache.requests.collectAsState()
+    val cachedSuggestedProfiles by MessagesInboxCache.suggestedProfiles.collectAsState()
+    val presenceMap by chatSocketManager.presenceState.collectAsState()
+    val effectiveRefreshing = isRefreshing || isInboxRefreshing
+
+    fun requestInboxRefresh() {
+        inboxRefreshNonce += 1
+    }
+
+    fun setRequestProcessing(requestId: String, active: Boolean) {
+        processingRequestIds = if (active) {
+            processingRequestIds + requestId
+        } else {
+            processingRequestIds - requestId
+        }
+    }
+
+    fun removeRequestFromCache(requestId: String) {
+        MessagesInboxCache.updateRequests(cachedRequests.filterNot { it.requestId == requestId })
+    }
+
+    fun prependConversationToInbox(item: ChatMessage) {
+        MessagesInboxCache.upsertChat(item)
+    }
 
     LaunchedEffect(Unit) {
         chatSocketManager.connect()
@@ -100,81 +135,148 @@ fun MessagesScreen(
     LaunchedEffect(Unit) {
         chatSocketManager.connectionEvents.collect { event ->
             if (event is com.stugram.app.core.socket.SocketConnectionEvent.Reconnected) {
-                inboxRefreshNonce += 1
+                requestInboxRefresh()
             }
         }
     }
 
     LaunchedEffect(Unit) {
         chatSocketManager.conversationUpdates.collect {
-            inboxRefreshNonce += 1
+            MessagesInboxCache.upsertChat(it.toInboxChat())
         }
     }
 
     LaunchedEffect(Unit) {
         chatSocketManager.messageSeenEvents.collect {
-            inboxRefreshNonce += 1
+            it.conversationId?.let { conversationId ->
+                MessagesInboxCache.patchChat(conversationId) { chat ->
+                    chat.copy(unreadCount = 0)
+                }
+            }
         }
     }
 
     LaunchedEffect(Unit) {
         chatSocketManager.messageReactionEvents.collect {
-            inboxRefreshNonce += 1
+            val conversationId = it.conversationId
+            val message = it.message
+            if (!conversationId.isNullOrBlank()) {
+                MessagesInboxCache.patchChat(conversationId) { chat ->
+                    if (chat.lastMessage == (message.text ?: "No messages yet")) {
+                        chat.copy(time = formatRelativeTime(message.updatedAt ?: message.createdAt))
+                    } else {
+                        chat
+                    }
+                }
+            }
         }
     }
 
     LaunchedEffect(Unit) {
         chatSocketManager.messageDeletedEvents.collect {
-            inboxRefreshNonce += 1
+            it.conversationId?.let { conversationId ->
+                MessagesInboxCache.patchChat(conversationId) { chat ->
+                    chat.copy(lastMessage = "Message removed")
+                }
+            }
         }
     }
 
     LaunchedEffect(Unit) {
         chatSocketManager.groupConversationUpdates.collect {
-            inboxRefreshNonce += 1
+            MessagesInboxCache.upsertGroup(it.toInboxGroup())
         }
     }
 
     LaunchedEffect(Unit) {
         chatSocketManager.groupMessageSeenEvents.collect {
-            inboxRefreshNonce += 1
+            it.groupId?.let { groupId ->
+                MessagesInboxCache.patchGroup(groupId) { group ->
+                    group.copy(unreadCount = 0)
+                }
+            }
         }
     }
 
     LaunchedEffect(Unit) {
         chatSocketManager.groupMessageReactionEvents.collect {
-            inboxRefreshNonce += 1
+            val groupId = it.groupId
+            val message = it.message
+            if (!groupId.isNullOrBlank()) {
+                MessagesInboxCache.patchGroup(groupId) { group ->
+                    if (group.lastMessage == (message.text ?: "No messages yet")) {
+                        group.copy(time = formatRelativeTime(message.updatedAt ?: message.createdAt))
+                    } else {
+                        group
+                    }
+                }
+            }
         }
     }
 
     LaunchedEffect(Unit) {
         chatSocketManager.groupMessageDeletedEvents.collect {
-            inboxRefreshNonce += 1
+            it.groupId?.let { groupId ->
+                MessagesInboxCache.patchGroup(groupId) { group ->
+                    group.copy(lastMessage = "Message removed")
+                }
+            }
         }
     }
 
     LaunchedEffect(Unit) {
         chatSocketManager.groupMemberAddedEvents.collect {
-            inboxRefreshNonce += 1
+            it.group?.let { group -> MessagesInboxCache.upsertGroup(group.toInboxGroup()) }
         }
     }
 
     LaunchedEffect(Unit) {
         chatSocketManager.groupMemberRemovedEvents.collect {
-            inboxRefreshNonce += 1
+            it.groupId?.let { groupId ->
+                MessagesInboxCache.patchGroup(groupId) { group -> group }
+            }
         }
     }
 
-    LaunchedEffect(inboxRefreshNonce, isRefreshing) {
+    LaunchedEffect(cachedSuggestedProfiles) {
+        if (cachedSuggestedProfiles.isNotEmpty()) {
+            suggestedProfiles = cachedSuggestedProfiles
+            suggestionsLoading = false
+        }
+    }
+
+    LaunchedEffect(isRefreshing) {
+        if (isRefreshing) requestInboxRefresh()
+    }
+
+    LaunchedEffect(inboxRefreshNonce) {
+        if (inboxRefreshNonce == 0 && MessagesInboxCache.hasWarmInbox()) {
+            chatsLoading = false
+            groupsLoading = false
+            requestsLoading = false
+            suggestionsLoading = false
+            suggestedProfiles = cachedSuggestedProfiles
+            return@LaunchedEffect
+        }
+        if (inboxRefreshNonce > 0) delay(450)
+        if (isInboxRefreshing) return@LaunchedEffect
+        isInboxRefreshing = true
         chatsLoading = cachedChats.isEmpty()
         groupsLoading = cachedGroups.isEmpty()
         requestsLoading = cachedRequests.isEmpty()
 
+        val summaryDeferred = async {
+            runCatching { chatRepository.getSummary() }.getOrNull()
+        }
+
         val chatDeferred = async {
             runCatching {
-                chatRepository.getConversations(page = 1, limit = 50).body()?.data.orEmpty().map { item ->
+                val response = chatRepository.getConversations(page = 1, limit = 50)
+                if (!response.isSuccessful) return@runCatching null
+                response.body()?.data.orEmpty().map { item ->
                     ChatMessage(
                         backendId = item.id,
+                        userId = item.otherParticipant?.id,
                         name = item.otherParticipant?.fullName?.takeIf { it.isNotBlank() }
                             ?: item.otherParticipant?.username
                             ?: "Unknown user",
@@ -190,7 +292,9 @@ fun MessagesScreen(
 
         val groupDeferred = async {
             runCatching {
-                groupChatRepository.getGroupChats(page = 1, limit = 50).body()?.data.orEmpty().map { item ->
+                val response = groupChatRepository.getGroupChats(page = 1, limit = 50)
+                if (!response.isSuccessful) return@runCatching null
+                response.body()?.data.orEmpty().map { item ->
                     GroupChat(
                         backendId = item.id,
                         name = item.name,
@@ -206,75 +310,114 @@ fun MessagesScreen(
         val requestDeferred = async {
             runCatching {
                 followRepository.getFollowRequests(page = 1, limit = 20).body()?.data.orEmpty().map { item ->
-                    ChatMessage(
-                        backendId = item.id,
+                    RequestInboxItem(
+                        requestId = item.id,
+                        requesterId = item.requester?.id,
+                        username = item.requester?.username.orEmpty(),
                         name = item.requester?.fullName?.takeIf { it.isNotBlank() }
                             ?: item.requester?.username
                             ?: "Follow request",
-                        username = item.requester?.username,
                         avatar = item.requester?.avatar,
-                        lastMessage = "Requested to follow you",
-                        time = item.status.replaceFirstChar { it.uppercase() },
-                        unreadCount = if (item.status == "pending") 1 else 0
+                        bio = item.requester?.bio,
+                        status = item.status
+                    )
+                }
+            }.getOrNull()
+        }
+        val suggestionsDeferred = async {
+            runCatching {
+                profileRepository.getProfileSuggestions(page = 1, limit = 20).body()?.data.orEmpty().map { item ->
+                    SuggestedChatProfile(
+                        userId = item.id,
+                        username = item.username,
+                        name = item.fullName.takeIf { it.isNotBlank() } ?: item.username,
+                        avatar = item.avatar,
+                        bio = item.bio,
+                        followStatus = item.followStatus
                     )
                 }
             }.getOrNull()
         }
 
+        summaryDeferred.await()?.takeIf { it.isSuccessful }?.body()?.data?.let { summary ->
+            MessagesInboxCache.setDirectUnreadSummary(summary.totalUnreadMessages)
+        }
         chatDeferred.await()?.let { MessagesInboxCache.updateChats(it) }
         groupDeferred.await()?.let { MessagesInboxCache.updateGroups(it) }
         requestDeferred.await()?.let { MessagesInboxCache.updateRequests(it) }
+        suggestionsDeferred.await()?.let {
+            suggestedProfiles = it
+            MessagesInboxCache.updateSuggestedProfiles(it)
+        }
+        MessagesInboxCache.markFullRefresh()
 
         chatsLoading = false
         groupsLoading = false
         requestsLoading = false
+        suggestionsLoading = false
+        isInboxRefreshing = false
     }
 
-    LaunchedEffect(searchQuery, selectedSection) {
-        if (selectedSection != 0) {
-            chatSearchResults = emptyList()
-            searchLoading = false
-            return@LaunchedEffect
-        }
-
-        val trimmed = searchQuery.trim()
-        if (trimmed.isBlank()) {
-            chatSearchResults = emptyList()
-            searchLoading = false
-            return@LaunchedEffect
-        }
-
-        searchLoading = true
-        delay(250)
-        val response = runCatching { chatRepository.searchConversations(trimmed, page = 1, limit = 50) }.getOrNull()
-        chatSearchResults = if (response?.isSuccessful == true) {
-            response.body()?.data.orEmpty().map { item ->
-                ChatMessage(
-                    backendId = item.id,
-                    name = item.otherParticipant?.fullName?.takeIf { it.isNotBlank() }
-                        ?: item.otherParticipant?.username
-                        ?: "Unknown user",
-                    username = item.otherParticipant?.username,
-                    avatar = item.otherParticipant?.avatar,
-                    lastMessage = item.lastMessage ?: "No messages yet",
-                    time = formatRelativeTime(item.lastMessageAt),
-                    unreadCount = item.unreadCount
-                )
-            }
+    val normalizedSearch = searchQuery.trim()
+    val visibleChats = remember(cachedChats, normalizedSearch) {
+        if (normalizedSearch.isBlank()) {
+            cachedChats
         } else {
-            emptyList()
+            cachedChats.filter {
+                it.name.contains(normalizedSearch, ignoreCase = true) ||
+                    (it.username?.contains(normalizedSearch, ignoreCase = true) == true) ||
+                    it.lastMessage.contains(normalizedSearch, ignoreCase = true)
+            }
         }
-        searchLoading = false
+    }
+    val visibleGroups = remember(cachedGroups, normalizedSearch) {
+        if (normalizedSearch.isBlank()) {
+            cachedGroups
+        } else {
+            cachedGroups.filter {
+                it.name.contains(normalizedSearch, ignoreCase = true) ||
+                    it.lastMessage.contains(normalizedSearch, ignoreCase = true)
+            }
+        }
+    }
+    val visibleRequests = remember(cachedRequests, normalizedSearch) {
+        if (normalizedSearch.isBlank()) {
+            cachedRequests
+        } else {
+            cachedRequests.filter {
+                it.name.contains(normalizedSearch, ignoreCase = true) ||
+                    it.username.contains(normalizedSearch, ignoreCase = true) ||
+                    (it.bio?.contains(normalizedSearch, ignoreCase = true) == true)
+            }
+        }
+    }
+    val visibleSuggestedProfiles = remember(suggestedProfiles, visibleChats, normalizedSearch) {
+        val existingUserIds = visibleChats.mapNotNull { it.userId }.toSet()
+        val existingUsernames = visibleChats.mapNotNull { it.username }.toSet()
+        suggestedProfiles.filter { profile ->
+            profile.userId !in existingUserIds &&
+                profile.username !in existingUsernames &&
+                (
+                    normalizedSearch.isBlank() ||
+                        profile.name.contains(normalizedSearch, ignoreCase = true) ||
+                        profile.username.contains(normalizedSearch, ignoreCase = true) ||
+                        (profile.bio?.contains(normalizedSearch, ignoreCase = true) == true)
+                    )
+        }
     }
 
     PullToRefreshBox(
-        isRefreshing = isRefreshing,
-        onRefresh = onRefresh,
+        isRefreshing = effectiveRefreshing,
+        onRefresh = {
+            if (!effectiveRefreshing) {
+                requestInboxRefresh()
+            }
+        },
         modifier = Modifier.fillMaxSize().background(backgroundColor),
         indicator = {
             PullToRefreshDefaults.Indicator(
                 state = rememberPullToRefreshState(),
-                isRefreshing = isRefreshing,
+                isRefreshing = effectiveRefreshing,
                 containerColor = if (isDarkMode) Color(0xFF1A1A1A) else Color.White,
                 color = accentBlue,
                 modifier = Modifier.align(Alignment.TopCenter)
@@ -302,6 +445,18 @@ fun MessagesScreen(
                     onValueChange = { searchQuery = it },
                     placeholder = { Text(if (selectedSection == 1) "Search groups..." else "Search messages...", color = secondaryContentColor.copy(0.5f)) },
                     leadingIcon = { Icon(Icons.Default.Search, null, tint = secondaryContentColor, modifier = Modifier.size(18.dp)) },
+                    trailingIcon = {
+                        if (searchQuery.isNotBlank()) {
+                            Icon(
+                                Icons.Default.Close,
+                                null,
+                                tint = secondaryContentColor,
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clickable { searchQuery = "" }
+                            )
+                        }
+                    },
                     modifier = Modifier
                         .weight(1f)
                         .height(48.dp),
@@ -315,6 +470,18 @@ fun MessagesScreen(
                     singleLine = true,
                     textStyle = LocalTextStyle.current.copy(fontSize = 15.sp, color = contentColor)
                 )
+
+                Spacer(Modifier.width(10.dp))
+
+                IconButton(
+                    onClick = { showComposerActions = true },
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(accentBlue.copy(alpha = 0.12f))
+                ) {
+                    Icon(Icons.Default.Edit, "Compose", tint = accentBlue)
+                }
             }
 
             // Header
@@ -333,9 +500,22 @@ fun MessagesScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(Modifier.weight(1f))
-                if (searchLoading && selectedSection == 0) {
-                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp, color = accentBlue)
+                if (normalizedSearch.isNotBlank()) {
+                    Text(
+                        text = "Search",
+                        color = secondaryContentColor,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                 }
+            }
+            requestActionError?.let { message ->
+                Text(
+                    text = message,
+                    color = Color.Red.copy(alpha = 0.92f),
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+                )
             }
 
             // Custom Tab Selector
@@ -410,12 +590,75 @@ fun MessagesScreen(
                 ) { targetPage ->
                     when (targetPage) {
                         0 -> {
-                            val visibleChats = if (searchQuery.isBlank()) cachedChats else chatSearchResults
                             when {
-                                visibleChats.isNotEmpty() -> LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
+                                visibleChats.isNotEmpty() || visibleSuggestedProfiles.isNotEmpty() || suggestionsLoading -> LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
                                     items(visibleChats, key = { it.backendId ?: it.username ?: it.name }) { chat ->
-                                        ChatItem(chat, contentColor, secondaryContentColor, accentBlue) { name ->
+                                        ChatItem(
+                                            chat = chat,
+                                            contentColor = contentColor,
+                                            secondaryColor = secondaryContentColor,
+                                            accent = accentBlue,
+                                            isOnline = chat.userId?.let { presenceMap[it]?.isOnline == true } == true,
+                                            onChatClick = { name ->
+                                            chat.backendId?.let { MessagesInboxCache.clearChatUnread(it) }
                                             onNavigateToChat(chat.backendId ?: "", chat.username ?: name, false)
+                                            }
+                                        )
+                                    }
+                                    if (visibleSuggestedProfiles.isNotEmpty() || suggestionsLoading) {
+                                        item("suggested_header") {
+                                            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp)) {
+                                                HorizontalDivider(color = secondaryContentColor.copy(alpha = 0.12f))
+                                                Spacer(Modifier.height(14.dp))
+                                                Text(
+                                                    text = if (normalizedSearch.isBlank()) "Suggested profiles" else "Matching profiles",
+                                                    color = accentBlue,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    text = "Tap any profile to start chatting.",
+                                                    color = secondaryContentColor,
+                                                    fontSize = 12.sp
+                                                )
+                                            }
+                                        }
+                                        if (suggestionsLoading && visibleSuggestedProfiles.isEmpty()) {
+                                            items(3) { SuggestedChatProfileSkeleton(isDarkMode = isDarkMode) }
+                                        } else {
+                                            items(visibleSuggestedProfiles, key = { it.userId }) { profile ->
+                                                SuggestedChatProfileRow(
+                                                    profile = profile,
+                                                    isDarkMode = isDarkMode,
+                                                    accent = accentBlue,
+                                                    isOpening = openingSuggestionIds.contains(profile.userId),
+                                                    onOpen = {
+                                                        if (openingSuggestionIds.contains(profile.userId)) return@SuggestedChatProfileRow
+                                                        openingSuggestionIds = openingSuggestionIds + profile.userId
+                                                        scope.launch {
+                                                            val conversationResponse = runCatching {
+                                                                chatRepository.createConversation(profile.userId)
+                                                            }.getOrNull()
+                                                            if (conversationResponse?.isSuccessful == true) {
+                                                                val conversation = conversationResponse.body()?.data
+                                                                val chatItem = ChatMessage(
+                                                                    backendId = conversation?.id,
+                                                                    userId = profile.userId,
+                                                                    name = profile.name,
+                                                                    username = profile.username,
+                                                                    avatar = profile.avatar,
+                                                                    lastMessage = conversation?.lastMessage ?: "No messages yet",
+                                                                    time = formatRelativeTime(conversation?.lastMessageAt),
+                                                                    unreadCount = conversation?.unreadCount ?: 0
+                                                                )
+                                                                prependConversationToInbox(chatItem)
+                                                                onNavigateToChat(conversation?.id.orEmpty(), profile.username, false)
+                                                            }
+                                                            openingSuggestionIds = openingSuggestionIds - profile.userId
+                                                        }
+                                                    }
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -430,13 +673,13 @@ fun MessagesScreen(
                             }
                         }
                         1 -> {
-                            val visibleGroups = if (searchQuery.isBlank()) cachedGroups else cachedGroups.filter {
-                                it.name.contains(searchQuery, ignoreCase = true) || it.lastMessage.contains(searchQuery, ignoreCase = true)
-                            }
                             when {
                                 visibleGroups.isNotEmpty() -> LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
                                     items(visibleGroups, key = { it.backendId ?: it.name }) { group ->
                                         GroupChatItem(group, contentColor, secondaryContentColor, accentBlue) { id, name ->
+                                            if (id.isNotBlank()) {
+                                                MessagesInboxCache.clearGroupUnread(id)
+                                            }
                                             onNavigateToGroupChat(id, name)
                                         }
                                     }
@@ -452,15 +695,106 @@ fun MessagesScreen(
                             }
                         }
                         2 -> {
-                            val visibleRequests = if (searchQuery.isBlank()) cachedRequests else cachedRequests.filter {
-                                it.name.contains(searchQuery, ignoreCase = true) || it.username.orEmpty().contains(searchQuery, ignoreCase = true)
-                            }
                             when {
                                 visibleRequests.isNotEmpty() -> LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
-                                    items(visibleRequests, key = { it.backendId ?: it.name }) { request ->
-                                        ChatItem(request, contentColor, secondaryContentColor, accentBlue) { name ->
-                                            onNavigateToChat(request.backendId ?: "", request.username ?: name, true)
-                                        }
+                                    items(visibleRequests, key = { it.requestId }) { request ->
+                                        RequestCard(
+                                            request = request,
+                                            isDarkMode = isDarkMode,
+                                            accent = accentBlue,
+                                            isProcessing = processingRequestIds.contains(request.requestId),
+                                            onOpenProfile = {
+                                                if (request.username.isNotBlank()) {
+                                                    onNavigateToProfile(request.username)
+                                                }
+                                            },
+                                            onAccept = {
+                                                val requesterId = request.requesterId
+                                                if (requesterId.isNullOrBlank()) {
+                                                    requestActionError = "Could not open chat for this request"
+                                                } else {
+                                                    scope.launch {
+                                                    requestActionError = null
+                                                    setRequestProcessing(request.requestId, true)
+                                                    val acceptResponse = runCatching {
+                                                        followRepository.acceptFollowRequest(request.requestId)
+                                                    }.getOrNull()
+                                                    if (acceptResponse?.isSuccessful != true) {
+                                                        requestActionError = acceptResponse?.body()?.message
+                                                            ?: acceptResponse?.message().orEmpty().ifBlank { "Could not accept follow request" }
+                                                        setRequestProcessing(request.requestId, false)
+                                                        return@launch
+                                                    }
+
+                                                    val conversationResponse = runCatching {
+                                                        chatRepository.createConversation(requesterId)
+                                                    }.getOrNull()
+
+                                                    removeRequestFromCache(request.requestId)
+
+                                                    if (conversationResponse?.isSuccessful == true) {
+                                                        val conversation = conversationResponse.body()?.data
+                                                        val chatItem = ChatMessage(
+                                                            backendId = conversation?.id,
+                                                            userId = requesterId,
+                                                            name = request.name,
+                                                            username = request.username,
+                                                            avatar = request.avatar,
+                                                            lastMessage = "You can message each other now",
+                                                            time = "Now",
+                                                            unreadCount = 0
+                                                        )
+                                                        prependConversationToInbox(chatItem)
+                                                        selectedSection = 0
+                                                        onNavigateToChat(conversation?.id.orEmpty(), request.username, false)
+                                                    } else {
+                                                        requestActionError = conversationResponse?.body()?.message
+                                                            ?: conversationResponse?.message().orEmpty().ifBlank { "Request accepted, but chat could not be opened yet" }
+                                                        requestInboxRefresh()
+                                                    }
+                                                    setRequestProcessing(request.requestId, false)
+                                                }
+                                                }
+                                            },
+                                            onDecline = {
+                                                scope.launch {
+                                                    requestActionError = null
+                                                    setRequestProcessing(request.requestId, true)
+                                                    val response = runCatching {
+                                                        followRepository.rejectFollowRequest(request.requestId)
+                                                    }.getOrNull()
+                                                    if (response?.isSuccessful == true) {
+                                                        removeRequestFromCache(request.requestId)
+                                                    } else {
+                                                        requestActionError = response?.body()?.message
+                                                            ?: response?.message().orEmpty().ifBlank { "Could not decline follow request" }
+                                                    }
+                                                    setRequestProcessing(request.requestId, false)
+                                                }
+                                            },
+                                            onBlock = {
+                                                val requesterId = request.requesterId
+                                                if (requesterId.isNullOrBlank()) {
+                                                    requestActionError = "Could not block this user"
+                                                } else {
+                                                    scope.launch {
+                                                    requestActionError = null
+                                                    setRequestProcessing(request.requestId, true)
+                                                    val blockResponse = runCatching {
+                                                        chatRepository.blockUser(requesterId)
+                                                    }.getOrNull()
+                                                    if (blockResponse?.isSuccessful == true) {
+                                                        runCatching { followRepository.rejectFollowRequest(request.requestId) }
+                                                        removeRequestFromCache(request.requestId)
+                                                    } else {
+                                                        requestActionError = blockResponse?.body()?.message
+                                                            ?: blockResponse?.message().orEmpty().ifBlank { "Could not block this user" }
+                                                    }
+                                                    setRequestProcessing(request.requestId, false)
+                                                }
+                                                }
+                                            }
+                                        )
                                     }
                                 }
                                 requestsLoading -> MessagesSkeletonList(isDarkMode = isDarkMode)
@@ -478,6 +812,64 @@ fun MessagesScreen(
             }
         }
 
+    }
+
+    if (showComposerActions) {
+        ModalBottomSheet(
+            onDismissRequest = { showComposerActions = false },
+            containerColor = if (isDarkMode) Color(0xFF15171B) else Color.White,
+            dragHandle = { BottomSheetDefaults.DragHandle() }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 8.dp)
+                    .navigationBarsPadding()
+            ) {
+                Text(
+                    text = "Start something new",
+                    color = contentColor,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+                ComposerActionRow(
+                    icon = Icons.AutoMirrored.Filled.Chat,
+                    title = "New chat",
+                    subtitle = "Switch to direct messages and use search to start a conversation.",
+                    accent = accentBlue,
+                    contentColor = contentColor,
+                    secondaryColor = secondaryContentColor
+                ) {
+                    showComposerActions = false
+                    selectedSection = 0
+                }
+                ComposerActionRow(
+                    icon = Icons.Default.Groups,
+                    title = "Create group",
+                    subtitle = "Pick members, choose a name, and open the new group chat.",
+                    accent = accentBlue,
+                    contentColor = contentColor,
+                    secondaryColor = secondaryContentColor
+                ) {
+                    showComposerActions = false
+                    showGroupCreate = true
+                }
+            }
+        }
+    }
+
+    if (showGroupCreate) {
+        GroupCreateScreen(
+            isDarkMode = isDarkMode,
+            accentBlue = accentBlue,
+            onClose = { showGroupCreate = false },
+            onGroupCreated = { group ->
+                showGroupCreate = false
+                MessagesInboxCache.upsertGroup(group)
+                onNavigateToGroupChat(group.backendId.orEmpty(), group.name)
+            }
+        )
     }
 }
 
@@ -724,20 +1116,32 @@ fun CreateNoteScreen(isDarkMode: Boolean, currentNote: String?, onDismiss: () ->
 }
 
 @Composable
-fun ChatItem(chat: ChatMessage, contentColor: Color, secondaryColor: Color, accent: Color, onChatClick: (String) -> Unit) {
+fun ChatItem(chat: ChatMessage, contentColor: Color, secondaryColor: Color, accent: Color, isOnline: Boolean = false, onChatClick: (String) -> Unit) {
     val isUnread = chat.unreadCount > 0
     Row(
         modifier = Modifier.fillMaxWidth().clickable { onChatClick(chat.name) }.padding(horizontal = 24.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        AppAvatar(
-            imageModel = chat.avatar,
-            name = chat.name,
-            username = chat.username ?: chat.name,
-            modifier = Modifier.size(56.dp),
-            isDarkMode = contentColor == Color.White,
-            fontSize = 20.sp
-        )
+        Box {
+            AppAvatar(
+                imageModel = chat.avatar,
+                name = chat.name,
+                username = chat.username ?: chat.name,
+                modifier = Modifier.size(56.dp),
+                isDarkMode = contentColor == Color.White,
+                fontSize = 20.sp
+            )
+            if (isOnline) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(11.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF00C853))
+                        .border(1.5.dp, if (contentColor == Color.White) Color(0xFF0F0F0F) else Color.White, CircleShape)
+                )
+            }
+        }
         Column(modifier = Modifier.weight(1f).padding(horizontal = 16.dp)) {
             Text(chat.name, color = contentColor, fontWeight = FontWeight.Bold, fontSize = 14.sp)
             Text(
@@ -916,8 +1320,293 @@ private fun InboxEmptyState(
 
 enum class NoteModalType { NONE, CREATE, VIEW_REPLY, MANAGE_OWN }
 data class NoteItemData(val name: String, val note: String? = null, val isMe: Boolean = false)
-data class ChatMessage(val backendId: String? = null, val name: String, val username: String? = null, val avatar: String? = null, val lastMessage: String, val time: String, val unreadCount: Int = 0)
+data class ChatMessage(val backendId: String? = null, val userId: String? = null, val name: String, val username: String? = null, val avatar: String? = null, val lastMessage: String, val time: String, val unreadCount: Int = 0)
 data class GroupChat(val backendId: String? = null, val name: String, val avatar: String? = null, val lastMessage: String, val time: String, val unreadCount: Int = 0)
+data class RequestInboxItem(
+    val requestId: String,
+    val requesterId: String? = null,
+    val username: String,
+    val name: String,
+    val avatar: String? = null,
+    val bio: String? = null,
+    val status: String = "pending"
+)
+data class SuggestedChatProfile(
+    val userId: String,
+    val username: String,
+    val name: String,
+    val avatar: String? = null,
+    val bio: String? = null,
+    val followStatus: String? = null
+)
+
+@Composable
+private fun ComposerActionRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    accent: Color,
+    contentColor: Color,
+    secondaryColor: Color,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(contentColor.copy(alpha = 0.05f))
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(accent.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, null, tint = accent)
+        }
+        Column(modifier = Modifier.weight(1f).padding(start = 12.dp, end = 8.dp)) {
+            Text(title, color = contentColor, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            Text(subtitle, color = secondaryColor, fontSize = 12.sp, lineHeight = 17.sp)
+        }
+        Icon(Icons.Default.ChevronRight, null, tint = secondaryColor)
+    }
+}
+
+@Composable
+fun RequestCard(
+    request: RequestInboxItem,
+    isDarkMode: Boolean,
+    accent: Color,
+    isProcessing: Boolean,
+    onOpenProfile: () -> Unit,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
+    onBlock: () -> Unit
+) {
+    val contentColor = if (isDarkMode) Color.White else Color.Black
+    val secondary = contentColor.copy(alpha = 0.64f)
+    val surface = if (isDarkMode) Color.White.copy(alpha = 0.06f) else Color.Black.copy(alpha = 0.03f)
+    val outline = if (isDarkMode) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(22.dp))
+            .background(surface)
+            .border(1.dp, outline, RoundedCornerShape(22.dp))
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpenProfile() },
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AppAvatar(
+                imageModel = request.avatar,
+                name = request.name,
+                username = request.username,
+                modifier = Modifier.size(54.dp),
+                isDarkMode = isDarkMode,
+                fontSize = 19.sp
+            )
+            Column(modifier = Modifier.weight(1f).padding(start = 14.dp, end = 8.dp)) {
+                Text(request.name, color = contentColor, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                Text("@${request.username}", color = accent, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    request.bio?.takeIf { it.isNotBlank() } ?: "Requested to follow you",
+                    color = secondary,
+                    fontSize = 12.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Icon(Icons.Default.ChevronRight, null, tint = secondary)
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Button(
+                onClick = onAccept,
+                enabled = !isProcessing,
+                modifier = Modifier.weight(1f).height(44.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = accent)
+            ) {
+                if (isProcessing) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                } else {
+                    Text("Accept", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+            OutlinedButton(
+                onClick = onDecline,
+                enabled = !isProcessing,
+                modifier = Modifier.weight(1f).height(44.dp),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, outline)
+            ) {
+                Text("Decline", color = contentColor, fontWeight = FontWeight.SemiBold)
+            }
+        }
+
+        TextButton(
+            onClick = onBlock,
+            enabled = !isProcessing,
+            modifier = Modifier.align(Alignment.End).padding(top = 4.dp)
+        ) {
+            Text("Block user", color = Color.Red.copy(alpha = 0.92f), fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun SuggestedChatProfileRow(
+    profile: SuggestedChatProfile,
+    isDarkMode: Boolean,
+    accent: Color,
+    isOpening: Boolean,
+    onOpen: () -> Unit
+) {
+    val contentColor = if (isDarkMode) Color.White else Color.Black
+    val secondary = contentColor.copy(alpha = 0.64f)
+    val surface = if (isDarkMode) Color.White.copy(alpha = 0.05f) else Color.Black.copy(alpha = 0.03f)
+    val outline = if (isDarkMode) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(surface)
+            .border(1.dp, outline, RoundedCornerShape(20.dp))
+            .clickable { onOpen() }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        AppAvatar(
+            imageModel = profile.avatar,
+            name = profile.name,
+            username = profile.username,
+            modifier = Modifier.size(52.dp),
+            isDarkMode = isDarkMode,
+            fontSize = 18.sp
+        )
+        Column(modifier = Modifier.weight(1f).padding(start = 14.dp, end = 10.dp)) {
+            Text(
+                text = profile.name,
+                color = contentColor,
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "@${profile.username}",
+                color = accent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = profile.bio?.takeIf { it.isNotBlank() } ?: "Start a conversation",
+                color = secondary,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Button(
+            onClick = onOpen,
+            enabled = !isOpening,
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = accent)
+        ) {
+            if (isOpening) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = Color.White
+                )
+            } else {
+                Text("Chat", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SuggestedChatProfileSkeleton(
+    isDarkMode: Boolean
+) {
+    val pulse by rememberInfiniteTransition(label = "suggestion_skeleton").animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(850, easing = EaseInOut),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "suggestion_skeleton_alpha"
+    )
+    val skeletonColor = if (isDarkMode) Color.White else Color.Black
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(skeletonColor.copy(alpha = 0.04f * pulse))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .clip(CircleShape)
+                .background(skeletonColor.copy(alpha = 0.08f * pulse))
+        )
+        Column(modifier = Modifier.weight(1f).padding(start = 14.dp, end = 10.dp)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.42f)
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(skeletonColor.copy(alpha = 0.08f * pulse))
+            )
+            Spacer(Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.3f)
+                    .height(10.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(skeletonColor.copy(alpha = 0.07f * pulse))
+            )
+            Spacer(Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.55f)
+                    .height(10.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(skeletonColor.copy(alpha = 0.06f * pulse))
+            )
+        }
+        Box(
+            modifier = Modifier
+                .width(62.dp)
+                .height(34.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(skeletonColor.copy(alpha = 0.1f * pulse))
+        )
+    }
+}
 
 private fun formatRelativeTime(value: String?): String {
     if (value.isNullOrBlank()) return "Now"
@@ -929,3 +1618,27 @@ private fun formatRelativeTime(value: String?): String {
         DateUtils.FORMAT_ABBREV_RELATIVE
     ).toString()
 }
+
+private fun DirectConversationModel.toInboxChat(): ChatMessage =
+    ChatMessage(
+        backendId = id,
+        userId = otherParticipant?.id,
+        name = otherParticipant?.fullName?.takeIf { it.isNotBlank() }
+            ?: otherParticipant?.username
+            ?: "Unknown user",
+        username = otherParticipant?.username,
+        avatar = otherParticipant?.avatar,
+        lastMessage = lastMessage ?: "No messages yet",
+        time = formatRelativeTime(lastMessageAt),
+        unreadCount = unreadCount
+    )
+
+private fun GroupConversationModel.toInboxGroup(): GroupChat =
+    GroupChat(
+        backendId = id,
+        name = name,
+        avatar = avatar,
+        lastMessage = lastMessage ?: "No messages yet",
+        time = formatRelativeTime(lastMessageAt),
+        unreadCount = unreadCount
+    )

@@ -1,7 +1,8 @@
 package com.stugram.app.core.socket
 
-import android.util.Log
 import com.stugram.app.BuildConfig
+import com.stugram.app.core.observability.ChatReliabilityLogger
+import com.stugram.app.core.observability.ChatReliabilityMetrics
 import com.stugram.app.core.storage.TokenManager
 import com.stugram.app.data.remote.model.DirectConversationModel
 import com.stugram.app.data.remote.model.ChatMessageModel
@@ -11,9 +12,15 @@ import io.socket.client.IO
 import io.socket.client.Socket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -33,6 +40,8 @@ class ChatSocketManager(private val tokenManager: TokenManager) {
 
     private val _presenceEvents = MutableSharedFlow<PresenceEvent>(extraBufferCapacity = 16)
     val presenceEvents: SharedFlow<PresenceEvent> = _presenceEvents
+    private val _presenceState = MutableStateFlow<Map<String, UserPresenceState>>(emptyMap())
+    val presenceState: StateFlow<Map<String, UserPresenceState>> = _presenceState.asStateFlow()
     private val _connectionEvents = MutableSharedFlow<SocketConnectionEvent>(extraBufferCapacity = 16)
     val connectionEvents: SharedFlow<SocketConnectionEvent> = _connectionEvents
     private val _conversationUpdates = MutableSharedFlow<DirectConversationModel>(extraBufferCapacity = 32)
@@ -78,7 +87,10 @@ class ChatSocketManager(private val tokenManager: TokenManager) {
     private val _groupMemberRemovedEvents = MutableSharedFlow<GroupMemberEvent>(extraBufferCapacity = 16)
     val groupMemberRemovedEvents: SharedFlow<GroupMemberEvent> = _groupMemberRemovedEvents
     private val joinedConversationIds = linkedSetOf<String>()
+    private val joinedGroupIds = linkedSetOf<String>()
     private var hasConnectedBefore = false
+    private var reconnectLoopStarted = false
+    private var reconnectWatchdogJob: Job? = null
 
     fun connect() {
         if (socket?.connected() == true) return
@@ -89,6 +101,11 @@ class ChatSocketManager(private val tokenManager: TokenManager) {
                 extraHeaders = mapOf("Authorization" to listOf("Bearer $token"))
                 forceNew = true
                 reconnection = true
+                reconnectionAttempts = Int.MAX_VALUE
+                reconnectionDelay = 1_000L
+                reconnectionDelayMax = 5_000L
+                randomizationFactor = 0.35
+                timeout = 15_000L
             }
 
             try {
@@ -98,28 +115,98 @@ class ChatSocketManager(private val tokenManager: TokenManager) {
 
                 setupListeners()
                 socket?.connect()
-                Log.d("ChatSocketManager", "Connecting to $baseUrl")
+                startReconnectWatchdog()
+                ChatReliabilityLogger.info("chat_socket_connect_requested", mapOf("baseUrl" to baseUrl.take(96)))
             } catch (e: Exception) {
-                Log.e("ChatSocketManager", "Socket connection error", e)
+                ChatReliabilityLogger.error("chat_socket_connect_failed", mapOf("errorCode" to (e.message ?: e::class.java.simpleName)))
+            }
+        }
+    }
+
+    fun isConnected(): Boolean = socket?.connected() == true
+
+    fun ensureConnected() {
+        val activeSocket = socket
+        if (activeSocket == null) {
+            connect()
+            return
+        }
+        if (!activeSocket.connected()) {
+            runCatching { activeSocket.connect() }
+                .onFailure {
+                    ChatReliabilityLogger.warn(
+                        "chat_socket_manual_reconnect_failed",
+                        mapOf("errorCode" to (it.message ?: it::class.java.simpleName))
+                    )
+                }
+        }
+    }
+
+    private fun startReconnectWatchdog() {
+        if (reconnectLoopStarted || reconnectWatchdogJob?.isActive == true) return
+        reconnectLoopStarted = true
+        reconnectWatchdogJob = scope.launch {
+            while (isActive) {
+                delay(12_000L)
+                if (socket != null && socket?.connected() != true) {
+                    ChatReliabilityLogger.warn(
+                        "chat_socket_watchdog_reconnect",
+                        mapOf("joinedDirectCount" to joinedConversationIds.size, "joinedGroupCount" to joinedGroupIds.size)
+                    )
+                    ensureConnected()
+                }
             }
         }
     }
 
     private fun setupListeners() {
         socket?.on(Socket.EVENT_CONNECT) {
-            Log.d("ChatSocketManager", "Socket Connected")
             val event = if (hasConnectedBefore) SocketConnectionEvent.Reconnected else SocketConnectionEvent.Connected
+            val eventName = if (hasConnectedBefore) "chat_socket_reconnected" else "chat_socket_connected"
+            ChatReliabilityLogger.info(eventName, mapOf("joinedDirectCount" to joinedConversationIds.size, "joinedGroupCount" to joinedGroupIds.size))
+            ChatReliabilityMetrics.increment("chat_socket_connection_total", mapOf("state" to if (hasConnectedBefore) "reconnected" else "connected"))
             hasConnectedBefore = true
             scope.launch { _connectionEvents.emit(event) }
             joinedConversationIds.forEach { id ->
                 val data = JSONObject().put("conversationId", id)
                 socket?.emit("conversation:join", data)
             }
+            joinedGroupIds.forEach { id ->
+                val data = JSONObject().put("groupId", id)
+                socket?.emit("group_chat:join", data)
+            }
         }
 
         socket?.on(Socket.EVENT_DISCONNECT) {
-            Log.d("ChatSocketManager", "Socket Disconnected")
+            ChatReliabilityLogger.warn("chat_socket_disconnected", emptyMap())
+            ChatReliabilityMetrics.increment("chat_socket_disconnected_total")
             scope.launch { _connectionEvents.emit(SocketConnectionEvent.Disconnected) }
+        }
+
+        socket?.on(Socket.EVENT_CONNECT_ERROR) { args ->
+            ChatReliabilityLogger.warn(
+                "chat_socket_connect_error",
+                mapOf("error" to args.firstOrNull()?.toString().orEmpty().take(160))
+            )
+            ChatReliabilityMetrics.increment("chat_socket_connect_error_total")
+            scope.launch { _connectionEvents.emit(SocketConnectionEvent.Disconnected) }
+        }
+
+        socket?.on("connect_timeout") {
+            ChatReliabilityLogger.warn("chat_socket_connect_timeout", emptyMap())
+            ChatReliabilityMetrics.increment("chat_socket_connect_timeout_total")
+            scope.launch { _connectionEvents.emit(SocketConnectionEvent.Disconnected) }
+        }
+
+        socket?.on("reconnect_attempt") {
+            ChatReliabilityLogger.info("chat_socket_reconnect_attempt", emptyMap())
+        }
+
+        socket?.on("reconnect_error") { args ->
+            ChatReliabilityLogger.warn(
+                "chat_socket_reconnect_error",
+                mapOf("error" to args.firstOrNull()?.toString().orEmpty().take(160))
+            )
         }
 
         socket?.on("new_message") { args ->
@@ -427,23 +514,48 @@ class ChatSocketManager(private val tokenManager: TokenManager) {
         socket?.on("user_online") { args ->
             val data = args[0] as JSONObject
             val userId = data.optString("userId")
-            scope.launch { _presenceEvents.emit(PresenceEvent(userId, true)) }
+            val event = PresenceEvent(userId = userId, isOnline = true, changedAt = System.currentTimeMillis())
+            updatePresenceState(event)
+            scope.launch { _presenceEvents.emit(event) }
         }
 
         socket?.on("user_offline") { args ->
             val data = args[0] as JSONObject
             val userId = data.optString("userId")
-            scope.launch { _presenceEvents.emit(PresenceEvent(userId, false)) }
+            val event = PresenceEvent(userId = userId, isOnline = false, changedAt = System.currentTimeMillis())
+            updatePresenceState(event)
+            scope.launch { _presenceEvents.emit(event) }
         }
     }
 
+    private fun updatePresenceState(event: PresenceEvent) {
+        if (event.userId.isBlank()) return
+        _presenceState.value = _presenceState.value.toMutableMap().apply {
+            put(
+                event.userId,
+                UserPresenceState(
+                    userId = event.userId,
+                    isOnline = event.isOnline,
+                    lastSeenAt = if (event.isOnline) null else event.changedAt,
+                    updatedAt = event.changedAt
+                )
+            )
+        }
+    }
+
+    fun currentPresence(userId: String?): UserPresenceState? =
+        userId?.takeIf { it.isNotBlank() }?.let { _presenceState.value[it] }
+
     fun joinConversation(conversationId: String) {
         joinedConversationIds.add(conversationId)
+        ensureConnected()
         val data = JSONObject().put("conversationId", conversationId)
         socket?.emit("conversation:join", data)
     }
 
     fun joinGroup(groupId: String) {
+        joinedGroupIds.add(groupId)
+        ensureConnected()
         val data = JSONObject().put("groupId", groupId)
         socket?.emit("group_chat:join", data)
     }
@@ -463,10 +575,14 @@ class ChatSocketManager(private val tokenManager: TokenManager) {
     }
 
     fun disconnect() {
+        reconnectWatchdogJob?.cancel()
+        reconnectWatchdogJob = null
+        reconnectLoopStarted = false
         socket?.disconnect()
         socket = null
         hasConnectedBefore = false
         joinedConversationIds.clear()
+        joinedGroupIds.clear()
     }
 
     companion object {
@@ -476,6 +592,13 @@ class ChatSocketManager(private val tokenManager: TokenManager) {
         fun getInstance(tokenManager: TokenManager): ChatSocketManager {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: ChatSocketManager(tokenManager).also { INSTANCE = it }
+            }
+        }
+
+        fun resetAuthenticatedSession() {
+            synchronized(this) {
+                INSTANCE?.disconnect()
+                INSTANCE = null
             }
         }
     }
@@ -491,7 +614,15 @@ data class TypingEvent(
 
 data class PresenceEvent(
     val userId: String,
-    val isOnline: Boolean
+    val isOnline: Boolean,
+    val changedAt: Long = System.currentTimeMillis()
+)
+
+data class UserPresenceState(
+    val userId: String,
+    val isOnline: Boolean = false,
+    val lastSeenAt: Long? = null,
+    val updatedAt: Long = System.currentTimeMillis()
 )
 
 data class ConversationUpdateEvent(

@@ -31,12 +31,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewModelScope
+import com.stugram.app.core.storage.TokenManager
 import com.stugram.app.data.remote.model.PostInteractionHistoryItem
 import com.stugram.app.data.remote.model.PostModel
 import com.stugram.app.data.repository.PostInteractionRepository
@@ -54,6 +56,7 @@ private fun PostModel.toPostDataSaved(): PostData {
         authorFullName = author.fullName,
         authorId = author.id,
         image = firstMedia?.url,
+        thumbnailUrl = firstMedia?.thumbnailUrl,
         userAvatar = author.avatar,
         caption = caption,
         likes = likesCount,
@@ -61,6 +64,8 @@ private fun PostModel.toPostDataSaved(): PostData {
         isLiked = false,
         isSaved = true,
         isVideo = firstMedia?.type == "video",
+        mediaAspectRatio = mediaAspectRatioFromDimensions(firstMedia?.width, firstMedia?.height),
+        authorFollowStatus = author.followStatus,
         createdAt = createdAt
     )
 }
@@ -141,6 +146,9 @@ fun SavedPostsScreen(
     onBack: () -> Unit
 ) {
     val viewModel: SavedPostsViewModel = viewModel()
+    val context = LocalContext.current
+    val tokenManager = remember(context) { TokenManager(context.applicationContext) }
+    val currentUser by tokenManager.currentUser.collectAsState(initial = null)
     val state by viewModel.state.collectAsState()
     val background = if (isDarkMode) Color(0xFF0F0F0F) else Color.White
     val content = if (isDarkMode) Color.White else Color.Black
@@ -248,6 +256,7 @@ fun SavedPostsScreen(
                                     isDarkMode = isDarkMode,
                                     onCommentsClick = { selectedPostId = it.backendId },
                                     onProfileClick = { username -> onNavigateToProfile(username) },
+                                    currentUserId = currentUser?.id,
                                     onToggleSave = { viewModel.unsave(it) }
                                 )
                                 // Make the whole card open detail without changing shared UI

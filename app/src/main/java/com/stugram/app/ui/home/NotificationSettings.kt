@@ -116,8 +116,15 @@ fun PushNotificationsScreen(
         }
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding).padding(20.dp).verticalScroll(rememberScrollState())) {
-            var pauseAll by remember { mutableStateOf(false) }
-            ToggleOptionRow("Pause All", "", pauseAll, isDarkMode, accentBlue) { pauseAll = it }
+            val allEnabled = listOf(
+                settings?.notifications?.likes ?: true,
+                settings?.notifications?.comments ?: true,
+                settings?.notifications?.followRequests ?: true,
+                settings?.notifications?.messages ?: true
+            ).all { it }
+            ToggleOptionRow("Pause All", "", !allEnabled, isDarkMode, accentBlue) {
+                viewModel.updateAllNotificationSettings(enabled = !it)
+            }
             
             Spacer(Modifier.height(24.dp))
             Text("Notifications", fontWeight = FontWeight.Bold, color = Color.Gray, fontSize = 13.sp)

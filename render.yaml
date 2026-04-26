@@ -1,0 +1,56 @@
+services:
+  - type: web
+    name: stugram-api
+    env: node
+    rootDir: backend
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /readyz
+    autoDeploy: false
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: ALLOW_MEMORY_DB_FALLBACK
+        value: false
+      - key: REDIS_REQUIRED
+        value: false
+      - key: QUEUE_ENABLED
+        value: false
+      - key: WORKER_REQUIRED
+        value: false
+      - key: RECOMMENDATION_WORKER_ENABLED
+        value: false
+      - key: RECOMMENDATION_MODE
+        value: db-direct
+      - key: CACHE_MODE
+        value: redis-optional
+      - key: REDIS_TLS
+        value: true
+      - key: REDIS_TLS_REJECT_UNAUTHORIZED
+        value: true
+      - key: ENABLE_BOOTSTRAP_USER
+        value: false
+      - key: ENABLE_MAINTENANCE_CLEANUP_SCHEDULER
+        value: true
+      - key: MONGODB_URI
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: OTP_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false

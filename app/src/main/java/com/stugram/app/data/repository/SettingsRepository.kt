@@ -1,6 +1,7 @@
 package com.stugram.app.data.repository
 
 import com.stugram.app.data.remote.ChangePasswordRequest
+import com.stugram.app.data.remote.HiddenWordsSettingsModel
 import com.stugram.app.data.remote.RetrofitClient
 import com.stugram.app.data.remote.UserSettingsModel
 import com.stugram.app.data.remote.model.BaseResponse
@@ -31,7 +32,9 @@ class SettingsRepository {
 
     suspend fun getHiddenWords() = settingsApi.getHiddenWords()
 
-    suspend fun updateHiddenWords(words: List<String>) = settingsApi.updateHiddenWords(words)
+    suspend fun updateHiddenWords(words: List<String>) = settingsApi.updateHiddenWords(HiddenWordsSettingsModel(words = words))
+
+    suspend fun updateHiddenWords(settings: HiddenWordsSettingsModel) = settingsApi.updateHiddenWords(settings)
 
     suspend fun changePassword(request: ChangePasswordRequest) = settingsApi.changePassword(request)
 }

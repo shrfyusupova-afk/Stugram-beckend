@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.stugram.app.core.storage.TokenManager
 import com.stugram.app.data.remote.BlockedUserModel
 import com.stugram.app.data.remote.ChangePasswordRequest
+import com.stugram.app.data.remote.HiddenWordsSettingsModel
 import com.stugram.app.data.remote.LoginSessionModel
 import com.stugram.app.data.remote.NotificationSettingsModel
 import com.stugram.app.data.remote.SearchHistoryItem
@@ -17,6 +18,7 @@ import com.stugram.app.data.repository.AuthRepository
 import com.stugram.app.data.repository.ProfileRepository
 import com.stugram.app.data.repository.SearchRepository
 import com.stugram.app.data.repository.SettingsRepository
+import com.stugram.app.data.repository.SupportRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,6 +28,7 @@ class SettingsViewModel(
     private val settingsRepository: SettingsRepository = SettingsRepository(),
     private val profileRepository: ProfileRepository = ProfileRepository(),
     private val searchRepository: SearchRepository = SearchRepository(),
+    private val supportRepository: SupportRepository = SupportRepository(),
     private val authRepository: AuthRepository = AuthRepository(),
     private val tokenManager: TokenManager? = null
 ) : ViewModel() {
@@ -51,8 +54,17 @@ class SettingsViewModel(
     private val _hiddenWords = MutableStateFlow<List<String>>(emptyList())
     val hiddenWords: StateFlow<List<String>> = _hiddenWords.asStateFlow()
 
+    private val _hiddenWordsSettings = MutableStateFlow(HiddenWordsSettingsModel())
+    val hiddenWordsSettings: StateFlow<HiddenWordsSettingsModel> = _hiddenWordsSettings.asStateFlow()
+
     private val _userProfile = MutableStateFlow<ProfileModel?>(null)
     val userProfile: StateFlow<ProfileModel?> = _userProfile.asStateFlow()
+
+    private val _statusMessage = MutableStateFlow<String?>(null)
+    val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
+
+    private val _supportTickets = MutableStateFlow<List<com.stugram.app.data.remote.SupportTicketModel>>(emptyList())
+    val supportTickets: StateFlow<List<com.stugram.app.data.remote.SupportTicketModel>> = _supportTickets.asStateFlow()
 
     init {
         loadAll()
@@ -65,6 +77,7 @@ class SettingsViewModel(
         fetchSearchHistory()
         fetchHiddenWords()
         fetchUserProfile()
+        fetchSupportTickets()
     }
 
     private fun fetchUserProfile() {
@@ -97,9 +110,14 @@ class SettingsViewModel(
                 val request = UpdateProfileRequest(fullName = fullName, username = username, bio = bio)
                 val response = profileRepository.updateProfile(request)
                 if (response.isSuccessful) {
-                    _userProfile.value = response.body()?.data
+                    response.body()?.data?.let { updated ->
+                        _userProfile.value = updated
+                        tokenManager?.updateCurrentUser(updated)
+                    }
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) {
+                _statusMessage.value = e.localizedMessage ?: "Profile update failed"
+            }
         }
     }
 
@@ -140,9 +158,12 @@ class SettingsViewModel(
                 val response = settingsRepository.updateSettings(mapOf(key to value))
                 if (response.isSuccessful) {
                     _settings.value = response.body()?.data
+                    _statusMessage.value = "Setting updated"
+                } else {
+                    _statusMessage.value = response.message().ifBlank { "Setting update failed" }
                 }
             } catch (e: Exception) {
-                // Rollback or show error
+                _statusMessage.value = e.localizedMessage ?: "Setting update failed"
             }
         }
     }
@@ -166,9 +187,39 @@ class SettingsViewModel(
                         if (current != null) {
                             _settings.value = current.copy(notifications = updated)
                         }
+                        _statusMessage.value = "Notification setting updated"
                     }
+                } else {
+                    _statusMessage.value = response.message().ifBlank { "Notification update failed" }
                 }
-            } catch (_: Exception) { }
+            } catch (e: Exception) {
+                _statusMessage.value = e.localizedMessage ?: "Notification update failed"
+            }
+        }
+    }
+
+    fun updateAllNotificationSettings(enabled: Boolean) {
+        val next = NotificationSettingsModel(
+            likes = enabled,
+            comments = enabled,
+            followRequests = enabled,
+            messages = enabled,
+            mentions = enabled,
+            system = enabled
+        )
+        viewModelScope.launch {
+            try {
+                val response = settingsRepository.updateNotificationSettings(next)
+                if (response.isSuccessful) {
+                    val updated = response.body()?.data ?: next
+                    _settings.value = (_settings.value ?: UserSettingsModel()).copy(notifications = updated)
+                    _statusMessage.value = if (enabled) "Push notifications enabled" else "Push notifications paused"
+                } else {
+                    _statusMessage.value = response.message().ifBlank { "Notification update failed" }
+                }
+            } catch (e: Exception) {
+                _statusMessage.value = e.localizedMessage ?: "Notification update failed"
+            }
         }
     }
 
@@ -263,7 +314,9 @@ class SettingsViewModel(
             try {
                 val response = settingsRepository.getHiddenWords()
                 if (response.isSuccessful) {
-                    _hiddenWords.value = response.body()?.data ?: emptyList()
+                    val updated = response.body()?.data ?: HiddenWordsSettingsModel()
+                    _hiddenWordsSettings.value = updated
+                    _hiddenWords.value = updated.words
                 }
             } catch (e: Exception) {}
         }
@@ -285,9 +338,94 @@ class SettingsViewModel(
             try {
                 val response = settingsRepository.updateHiddenWords(words)
                 if (response.isSuccessful) {
-                    _hiddenWords.value = response.body()?.data ?: words
+                    val updated = response.body()?.data ?: HiddenWordsSettingsModel(words = words)
+                    _hiddenWordsSettings.value = updated
+                    _hiddenWords.value = updated.words
+                    _statusMessage.value = "Hidden words updated"
+                } else {
+                    _statusMessage.value = response.message().ifBlank { "Hidden words update failed" }
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) {
+                _statusMessage.value = e.localizedMessage ?: "Hidden words update failed"
+            }
+        }
+    }
+
+    fun updateHiddenWordsSetting(
+        hideComments: Boolean? = null,
+        hideMessages: Boolean? = null,
+        hideStoryReplies: Boolean? = null
+    ) {
+        val current = _hiddenWordsSettings.value
+        val next = current.copy(
+            hideComments = hideComments ?: current.hideComments,
+            hideMessages = hideMessages ?: current.hideMessages,
+            hideStoryReplies = hideStoryReplies ?: current.hideStoryReplies
+        )
+        viewModelScope.launch {
+            try {
+                val response = settingsRepository.updateHiddenWords(next)
+                if (response.isSuccessful) {
+                    val updated = response.body()?.data ?: next
+                    _hiddenWordsSettings.value = updated
+                    _hiddenWords.value = updated.words
+                    _statusMessage.value = "Hidden words filters updated"
+                } else {
+                    _statusMessage.value = response.message().ifBlank { "Hidden words update failed" }
+                }
+            } catch (e: Exception) {
+                _statusMessage.value = e.localizedMessage ?: "Hidden words update failed"
+            }
+        }
+    }
+
+    fun forgotPassword(onResult: (Boolean, String?) -> Unit) {
+        val identity = _userProfile.value?.identity
+        if (identity.isNullOrBlank()) {
+            onResult(false, "No email or phone identity found for this account")
+            return
+        }
+        viewModelScope.launch {
+            when (val result = authRepository.forgotPassword(identity)) {
+                is ApiResult.Success -> onResult(true, result.message)
+                is ApiResult.Error -> onResult(false, result.message)
+            }
+        }
+    }
+
+    fun fetchSupportTickets() {
+        viewModelScope.launch {
+            try {
+                val response = supportRepository.getMySupportTickets()
+                if (response.isSuccessful) {
+                    _supportTickets.value = response.body()?.data ?: emptyList()
+                }
+            } catch (_: Exception) { }
+        }
+    }
+
+    fun createSupportTicket(subject: String, description: String, onResult: (Boolean, String?) -> Unit) {
+        if (subject.trim().length < 3 || description.trim().length < 10) {
+            onResult(false, "Subject must be at least 3 characters and description at least 10 characters")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val response = supportRepository.createProblemTicket(
+                    category = "bug",
+                    subject = subject.trim(),
+                    description = description.trim(),
+                    deviceInfo = "Android closed-alpha settings screen"
+                )
+                if (response.isSuccessful) {
+                    fetchSupportTickets()
+                    onResult(true, response.body()?.message ?: "Support ticket created")
+                } else {
+                    onResult(false, response.message().ifBlank { "Support ticket failed" })
+                }
+            } catch (e: Exception) {
+                onResult(false, e.localizedMessage ?: "Support ticket failed")
+            }
         }
     }
 
@@ -296,9 +434,13 @@ class SettingsViewModel(
             when (authRepository.logout()) {
                 is ApiResult.Success -> onComplete()
                 is ApiResult.Error -> {
-                    // Keep the current session intact if backend logout fails.
+                    _statusMessage.value = "Logout failed. Please try again."
                 }
             }
         }
+    }
+
+    fun consumeStatusMessage() {
+        _statusMessage.value = null
     }
 }

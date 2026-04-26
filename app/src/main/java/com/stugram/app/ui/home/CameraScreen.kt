@@ -103,6 +103,9 @@ enum class StoryEditorTool {
     Text, Sticker, Music, Brush, Effects, Mention, Download
 }
 
+private const val CREATION_MAX_UPLOAD_BYTES = 100L * 1024L * 1024L
+private const val CREATION_MAX_UPLOAD_LABEL = "100 MB"
+
 data class StoryTextData(
     val id: Long = System.currentTimeMillis(),
     val text: String,
@@ -145,6 +148,7 @@ data class PostDraftMedia(
     val mimeType: String,
     val displayName: String,
     val fileSizeLabel: String,
+    val fileSizeBytes: Long,
     val isVideo: Boolean
 )
 
@@ -155,6 +159,19 @@ private class MediaTransformState(
     var scale by mutableFloatStateOf(initialScale)
     var offset by mutableStateOf(initialOffset)
 }
+
+private data class PostAspectOption(
+    val label: String,
+    val ratio: Float,
+    val icon: ImageVector
+)
+
+private val postAspectOptions = listOf(
+    PostAspectOption("1:1", 1f, Icons.Rounded.CropSquare),
+    PostAspectOption("4:5", 4f / 5f, Icons.Rounded.CropPortrait),
+    PostAspectOption("9:16", 9f / 16f, Icons.Rounded.StayCurrentPortrait),
+    PostAspectOption("16:9", 16f / 9f, Icons.Rounded.CropLandscape)
+)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -213,11 +230,16 @@ fun CameraScreen(
                 context.toPostDraftMedia(uri)?.takeIf { !it.isVideo }
             }
             if (incoming.isNotEmpty()) {
+                val accepted = incoming.filter { it.fileSizeBytes <= CREATION_MAX_UPLOAD_BYTES }
+                val rejectedCount = incoming.size - accepted.size
+                if (rejectedCount > 0) {
+                    publishError = "Some photos are larger than $CREATION_MAX_UPLOAD_LABEL. Please choose smaller media."
+                }
                 val currentImages = postDraftMedia.filter { !it.isVideo }
-                postDraftMedia = (currentImages + incoming)
+                postDraftMedia = (currentImages + accepted)
                     .distinctBy { it.uri.toString() }
                     .take(10)
-                publishError = null
+                if (accepted.isNotEmpty() && rejectedCount == 0) publishError = null
             }
         }
     }
@@ -227,23 +249,35 @@ fun CameraScreen(
     ) { uri ->
         val draft = uri?.let { context.toPostDraftMedia(it) }
         if (draft != null) {
-            postDraftMedia = listOf(draft)
-            publishError = null
+            if (draft.fileSizeBytes > CREATION_MAX_UPLOAD_BYTES) {
+                publishError = "This video is ${draft.fileSizeLabel}. Maximum upload size is $CREATION_MAX_UPLOAD_LABEL."
+            } else {
+                postDraftMedia = listOf(draft)
+                publishError = null
+            }
         }
     }
 
     val storyMediaPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
-        storyDraftMedia = uri?.let { context.toPostDraftMedia(it) }
-        storyPublishError = null
+        val draft = uri?.let { context.toPostDraftMedia(it) }
+        if (draft != null && draft.fileSizeBytes > CREATION_MAX_UPLOAD_BYTES) {
+            storyDraftMedia = null
+            storyPublishError = "This story media is ${draft.fileSizeLabel}. Maximum upload size is $CREATION_MAX_UPLOAD_LABEL."
+        } else {
+            storyDraftMedia = draft
+            storyPublishError = null
+        }
     }
 
     val reelVideoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
         val draft = uri?.let { context.toPostDraftMedia(it) }
-        if (draft != null && draft.isVideo) {
+        if (draft != null && draft.isVideo && draft.fileSizeBytes > CREATION_MAX_UPLOAD_BYTES) {
+            reelPublishError = "This reel video is ${draft.fileSizeLabel}. Maximum upload size is $CREATION_MAX_UPLOAD_LABEL."
+        } else if (draft != null && draft.isVideo) {
             reelDraftMedia = draft
             reelPublishError = null
         } else if (uri != null) {
@@ -290,6 +324,11 @@ fun CameraScreen(
 
     suspend fun publishPostDraft() {
         if (postDraftMedia.isEmpty() || isPublishingPost) return
+        val oversizedMedia = postDraftMedia.firstOrNull { it.fileSizeBytes > CREATION_MAX_UPLOAD_BYTES }
+        if (oversizedMedia != null) {
+            publishError = "${oversizedMedia.displayName} is ${oversizedMedia.fileSizeLabel}. Maximum upload size is $CREATION_MAX_UPLOAD_LABEL."
+            return
+        }
 
         publishError = null
         isPublishingPost = true
@@ -332,6 +371,10 @@ fun CameraScreen(
     suspend fun publishStoryDraft() {
         val draft = storyDraftMedia ?: return
         if (isPublishingStory) return
+        if (draft.fileSizeBytes > CREATION_MAX_UPLOAD_BYTES) {
+            storyPublishError = "${draft.displayName} is ${draft.fileSizeLabel}. Maximum upload size is $CREATION_MAX_UPLOAD_LABEL."
+            return
+        }
 
         storyPublishError = null
         isPublishingStory = true
@@ -366,6 +409,10 @@ fun CameraScreen(
     suspend fun publishReelDraft() {
         val draft = reelDraftMedia ?: return
         if (isPublishingReel) return
+        if (draft.fileSizeBytes > CREATION_MAX_UPLOAD_BYTES) {
+            reelPublishError = "${draft.displayName} is ${draft.fileSizeLabel}. Maximum upload size is $CREATION_MAX_UPLOAD_LABEL."
+            return
+        }
 
         reelPublishError = null
         isPublishingReel = true
@@ -884,6 +931,7 @@ fun PostComposerScreen(
     val publishEnabled = media.isNotEmpty() && !isPublishing
     val hasVideo = media.any { it.isVideo }
     val imageTransforms = remember { mutableStateMapOf<String, MediaTransformState>() }
+    var selectedAspectOption by remember { mutableStateOf(postAspectOptions[1]) }
 
     fun imageTransformState(item: PostDraftMedia): MediaTransformState {
         return imageTransforms.getOrPut(item.uri.toString()) { MediaTransformState() }
@@ -962,13 +1010,11 @@ fun PostComposerScreen(
                                     },
                                     modifier = Modifier.fillMaxSize()
                                 )
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.Center)
-                                        .padding(22.dp)
-                                        .fillMaxWidth()
-                                        .aspectRatio(4f / 5f)
-                                        .border(2.dp, accentBlue.copy(alpha = 0.9f), RoundedCornerShape(24.dp))
+                                PostAspectFrame(
+                                    aspectRatio = selectedAspectOption.ratio,
+                                    accentBlue = accentBlue,
+                                    borderColor = accentBlue.copy(alpha = 0.9f),
+                                    modifier = Modifier.matchParentSize()
                                 )
                                 Box(
                                     modifier = Modifier
@@ -1014,13 +1060,11 @@ fun PostComposerScreen(
                                             },
                                         contentScale = ContentScale.Crop
                                     )
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.Center)
-                                            .padding(22.dp)
-                                            .fillMaxWidth()
-                                            .aspectRatio(4f / 5f)
-                                            .border(2.dp, Color.White.copy(alpha = 0.88f), RoundedCornerShape(22.dp))
+                                    PostAspectFrame(
+                                        aspectRatio = selectedAspectOption.ratio,
+                                        accentBlue = accentBlue,
+                                        borderColor = Color.White.copy(alpha = 0.88f),
+                                        modifier = Modifier.matchParentSize()
                                     )
                                     Box(
                                         modifier = Modifier
@@ -1072,6 +1116,15 @@ fun PostComposerScreen(
                         }
                     }
                 }
+            }
+
+            if (media.isNotEmpty()) {
+                PostAspectSizeSelector(
+                    options = postAspectOptions,
+                    selected = selectedAspectOption,
+                    accentBlue = accentBlue,
+                    onSelect = { selectedAspectOption = it }
+                )
             }
 
             if (media.size > 1) {
@@ -1211,6 +1264,78 @@ fun PostComposerScreen(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PostAspectFrame(
+    aspectRatio: Float,
+    accentBlue: Color,
+    borderColor: Color,
+    modifier: Modifier = Modifier
+) {
+    BoxWithConstraints(
+        modifier = modifier.padding(22.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        val containerRatio = maxWidth.value / maxHeight.value.coerceAtLeast(1f)
+        val frameModifier = if (containerRatio > aspectRatio) {
+            Modifier.fillMaxHeight().aspectRatio(aspectRatio)
+        } else {
+            Modifier.fillMaxWidth().aspectRatio(aspectRatio)
+        }
+
+        Box(
+            modifier = frameModifier
+                .clip(RoundedCornerShape(22.dp))
+                .border(2.dp, borderColor, RoundedCornerShape(22.dp))
+        )
+    }
+}
+
+@Composable
+private fun PostAspectSizeSelector(
+    options: List<PostAspectOption>,
+    selected: PostAspectOption,
+    accentBlue: Color,
+    onSelect: (PostAspectOption) -> Unit
+) {
+    LazyRow(
+        modifier = Modifier.padding(top = 12.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        items(options, key = { it.label }) { option ->
+            val isSelected = option == selected
+            Surface(
+                onClick = { onSelect(option) },
+                shape = RoundedCornerShape(18.dp),
+                color = if (isSelected) accentBlue.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.08f),
+                border = BorderStroke(
+                    width = if (isSelected) 1.4.dp else 1.dp,
+                    color = if (isSelected) accentBlue else Color.White.copy(alpha = 0.12f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
+                    Icon(
+                        option.icon,
+                        contentDescription = null,
+                        tint = if (isSelected) accentBlue else Color.White.copy(alpha = 0.72f),
+                        modifier = Modifier.size(17.dp)
+                    )
+                    Text(
+                        option.label,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold
+                    )
                 }
             }
         }
@@ -1680,36 +1805,36 @@ fun ReelComposerScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        media?.let { draft ->
-            AndroidView(
-                factory = { context ->
-                    VideoView(context).apply {
-                        setVideoURI(draft.uri)
-                        setOnPreparedListener { mediaPlayer ->
-                            mediaPlayer.isLooping = true
-                            start()
-                        }
-                    }
-                },
-                update = { view ->
-                    view.setVideoURI(draft.uri)
-                    view.setOnPreparedListener { mediaPlayer ->
-                        mediaPlayer.isLooping = true
-                        view.start()
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Brush.verticalGradient(listOf(Color.Black.copy(0.18f), Color.Transparent, Color.Black.copy(0.86f))))
-        )
-
         when (step) {
             ReelComposerStep.Preview -> {
+                media?.let { draft ->
+                    AndroidView(
+                        factory = { context ->
+                            VideoView(context).apply {
+                                setVideoURI(draft.uri)
+                                setOnPreparedListener { mediaPlayer ->
+                                    mediaPlayer.isLooping = true
+                                    start()
+                                }
+                            }
+                        },
+                        update = { view ->
+                            view.setVideoURI(draft.uri)
+                            view.setOnPreparedListener { mediaPlayer ->
+                                mediaPlayer.isLooping = true
+                                view.start()
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Brush.verticalGradient(listOf(Color.Black.copy(0.18f), Color.Transparent, Color.Black.copy(0.86f))))
+                )
+
                 Column(modifier = Modifier.fillMaxSize()) {
                     Row(
                         modifier = Modifier
@@ -1888,6 +2013,11 @@ fun ReelComposerScreen(
 
             ReelComposerStep.Details -> {
                 val coverBitmap by rememberVideoFrameBitmap(media?.uri)
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                )
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -2672,13 +2802,12 @@ fun StoryEditView(
                 onClick = {
                     scope.launch {
                         isPublishing = true
-                        val context = context // Ensure context is accessible or use LocalContext
-                        val exportedFile = exportStory(context)
-                        if (exportedFile != null) {
+                        val selectedStoryUri = runCatching { Uri.parse(imageUrl) }.getOrNull()
+                        if (selectedStoryUri != null && imageUrl.isNotBlank() && imageUrl != "null") {
                             val storyRepository = StoryRepository()
                             val response = storyRepository.createStory(
                                 context = context,
-                                mediaUri = Uri.fromFile(exportedFile),
+                                mediaUri = selectedStoryUri,
                                 caption = ""
                             )
                             when (val outcome = response.toUploadOutcome("Failed to publish story")) {
@@ -2693,7 +2822,7 @@ fun StoryEditView(
                                 }
                             }
                         } else {
-                            snackBarHostState.showSnackbar("Export failed")
+                            snackBarHostState.showSnackbar("Story media is not available")
                         }
                         closeTransientPanels()
                         isPublishing = false
@@ -3362,11 +3491,13 @@ fun DraggableMusicWidget(
 
 private fun Context.toPostDraftMedia(uri: Uri): PostDraftMedia? {
     val mimeType = contentResolver.getType(uri) ?: return null
+    val fileSizeBytes = resolveCreationFileSizeBytes(uri)
     return PostDraftMedia(
         uri = uri,
         mimeType = mimeType,
         displayName = resolveCreationDisplayName(uri),
-        fileSizeLabel = resolveCreationFileSize(uri),
+        fileSizeLabel = fileSizeBytes.takeIf { it > 0L }?.toCreationReadableSize() ?: "",
+        fileSizeBytes = fileSizeBytes,
         isVideo = mimeType.startsWith("video")
     )
 }
@@ -3381,15 +3512,15 @@ private fun Context.resolveCreationDisplayName(uri: Uri): String {
     return "Media"
 }
 
-private fun Context.resolveCreationFileSize(uri: Uri): String {
+private fun Context.resolveCreationFileSizeBytes(uri: Uri): Long {
     val cursor = contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)
     cursor?.use {
         if (it.moveToFirst()) {
             val size = it.getLong(0)
-            if (size > 0L) return size.toCreationReadableSize()
+            if (size > 0L) return size
         }
     }
-    return ""
+    return 0L
 }
 
 private fun Long.toCreationReadableSize(): String {
@@ -3410,12 +3541,13 @@ fun pxToDp(px: Float) = with(androidx.compose.ui.platform.LocalDensity.current) 
 @Composable
 private fun rememberVideoFrameBitmap(uri: Uri?): State<Bitmap?> {
     val context = LocalContext.current
-    return produceState<Bitmap?>(initialValue = null, key1 = uri) {
+    val frameState = remember { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(uri) {
         if (uri == null) {
-            value = null
-            return@produceState
+            frameState.value = null
+            return@LaunchedEffect
         }
-        value = withContext(kotlinx.coroutines.Dispatchers.IO) {
+        frameState.value = withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching {
                 val retriever = MediaMetadataRetriever()
                 try {
@@ -3433,6 +3565,7 @@ private fun rememberVideoFrameBitmap(uri: Uri?): State<Bitmap?> {
             }.getOrNull()
         }
     }
+    return frameState
 }
 
 suspend fun PointerInputScope.detectTransformGestures(

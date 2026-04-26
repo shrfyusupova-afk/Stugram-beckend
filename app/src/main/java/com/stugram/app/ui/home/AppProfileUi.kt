@@ -36,6 +36,10 @@ private fun Any?.isDemoProfileVisual(): Boolean = when (this) {
     is String -> {
         val value = trim().lowercase()
         value.isBlank() ||
+            value == "false" ||
+            value == "true" ||
+            value == "null" ||
+            value == "undefined" ||
             value.contains("picsum.photos") ||
             value.contains("/seed/") ||
             value.contains("photo_1") ||

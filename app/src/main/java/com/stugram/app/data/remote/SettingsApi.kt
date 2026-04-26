@@ -34,10 +34,10 @@ interface SettingsApi {
     suspend fun revokeSession(@Path("sessionId") sessionId: String): Response<BaseResponse<Unit>>
 
     @GET("settings/me/hidden-words")
-    suspend fun getHiddenWords(): Response<BaseResponse<List<String>>>
+    suspend fun getHiddenWords(): Response<BaseResponse<HiddenWordsSettingsModel>>
 
     @PATCH("settings/me/hidden-words")
-    suspend fun updateHiddenWords(@Body words: List<String>): Response<BaseResponse<List<String>>>
+    suspend fun updateHiddenWords(@Body request: HiddenWordsSettingsModel): Response<BaseResponse<HiddenWordsSettingsModel>>
 
     @POST("auth/change-password")
     suspend fun changePassword(@Body request: ChangePasswordRequest): Response<BaseResponse<Unit>>
@@ -49,8 +49,9 @@ data class ChangePasswordRequest(
 )
 
 data class UserSettingsModel(
-    val _id: String,
-    val userId: String,
+    val _id: String = "",
+    val userId: String = "",
+    val user: String? = null,
     val isPrivateAccount: Boolean = false,
     val isDarkMode: Boolean = true,
     val readReceipts: Boolean = true,
@@ -64,7 +65,16 @@ data class NotificationSettingsModel(
     val likes: Boolean = true,
     val comments: Boolean = true,
     val followRequests: Boolean = true,
-    val messages: Boolean = true
+    val messages: Boolean = true,
+    val mentions: Boolean = true,
+    val system: Boolean = true
+)
+
+data class HiddenWordsSettingsModel(
+    val words: List<String> = emptyList(),
+    val hideComments: Boolean = true,
+    val hideMessages: Boolean = true,
+    val hideStoryReplies: Boolean = true
 )
 
 data class BlockedUserModel(

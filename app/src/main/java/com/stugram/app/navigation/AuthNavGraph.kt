@@ -13,13 +13,11 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.*
-import kotlinx.coroutines.flow.collect
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -146,6 +144,9 @@ fun AuthNavGraph(
                 },
                 onNavigateToGroupChat = { targetGroupId, targetGroupName ->
                     navController.navigate(Screen.GroupChatDetail.createRoute(targetGroupId, targetGroupName))
+                },
+                onNavigateToPost = { postId ->
+                    navController.navigate(Screen.PostDetail.createRoute(postId))
                 }
             )
         }
@@ -175,6 +176,9 @@ fun AuthNavGraph(
                 },
                 onNavigateToGroupChat = { targetGroupId, targetGroupName ->
                     navController.navigate(Screen.GroupChatDetail.createRoute(targetGroupId, targetGroupName))
+                },
+                onNavigateToPost = { postId ->
+                    navController.navigate(Screen.PostDetail.createRoute(postId))
                 }
             )
         }
@@ -204,9 +208,7 @@ private fun SplashGate(
 ) {
     val context = LocalContext.current.applicationContext
     val tokenManager = remember { TokenManager(context) }
-    val sessions by produceState<List<TokenManager.StoredSession>?>(initialValue = null, tokenManager) {
-        tokenManager.sessions.collect { value = it }
-    }
+    val sessions by tokenManager.sessions.collectAsState(initial = emptyList())
     var minimumDelayComplete by remember { mutableStateOf(false) }
     var navigationDone by remember { mutableStateOf(false) }
 
@@ -216,9 +218,9 @@ private fun SplashGate(
     }
 
     LaunchedEffect(minimumDelayComplete, sessions) {
-        if (!minimumDelayComplete || navigationDone || sessions == null) return@LaunchedEffect
+        if (!minimumDelayComplete || navigationDone) return@LaunchedEffect
         navigationDone = true
-        if (sessions!!.isNotEmpty()) onNavigateToHome() else onNavigateToAuth()
+        if (sessions.isNotEmpty()) onNavigateToHome() else onNavigateToAuth()
     }
 
     Box(

@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -41,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.stugram.app.core.storage.TokenManager
 import com.stugram.app.ui.search.SearchViewModel
 import com.stugram.app.ui.search.toUIModel
 import kotlin.math.absoluteValue
@@ -54,6 +56,10 @@ fun SearchScreen(
     onProfileClick: (String) -> Unit = {}
 ) {
     val searchViewModel: SearchViewModel = viewModel()
+    val context = LocalContext.current
+    val tokenManager = remember(context) { TokenManager(context.applicationContext) }
+    val currentUser by tokenManager.currentUser.collectAsState(initial = null)
+    val currentUserId = currentUser?.id
     val backgroundColor = if (isDarkMode) GlobalBackgroundColor else Color.White
     val contentColor = if (isDarkMode) Color.White else Color.Black
     val glassBg = if (isDarkMode) Color.White.copy(0.12f) else Color.White.copy(0.7f)
@@ -75,6 +81,7 @@ fun SearchScreen(
     val isExploreState = searchViewModel.isShowingExploreState()
     val userDisplayList = if (isExploreState) searchViewModel.activeCreators else searchViewModel.userResults
     val postDisplayList = if (isExploreState) searchViewModel.trendingPosts else searchViewModel.postResults
+    val effectiveRefreshing = isRefreshing || searchViewModel.isRefreshing
 
     BackHandler(enabled = isSearchModalOpen || currentView == "post_detail") {
         if (currentView == "post_detail") {
@@ -93,18 +100,24 @@ fun SearchScreen(
                 onBack = { currentView = "search" },
                 onProfileClick = onProfileClick,
                 onCommentsClick = { selectedCommentsPost = it },
+                currentUserId = currentUserId,
                 onToggleLike = { searchViewModel.toggleLike(it) },
                 onToggleSave = { searchViewModel.toggleSave(it) }
             )
         } else {
             PullToRefreshBox(
-                isRefreshing = isRefreshing,
-                onRefresh = onRefresh,
+                isRefreshing = effectiveRefreshing,
+                onRefresh = {
+                    if (!effectiveRefreshing) {
+                        searchViewModel.refresh()
+                        onRefresh()
+                    }
+                },
                 modifier = Modifier.fillMaxSize(),
                 indicator = {
                     PullToRefreshDefaults.Indicator(
                         state = rememberPullToRefreshState(),
-                        isRefreshing = isRefreshing,
+                        isRefreshing = effectiveRefreshing,
                         color = accentBlue,
                         containerColor = if (isDarkMode) Color(0xFF1A1A1A) else Color.White,
                         modifier = Modifier.align(Alignment.TopCenter)
@@ -165,7 +178,12 @@ fun SearchScreen(
                                         color = contentColor,
                                         modifier = Modifier.padding(start = 16.dp, bottom = 12.dp)
                                     )
-                                    CreatorsLoopPager(isDarkMode, accentBlue, onProfileClick)
+                                    CreatorsLoopPager(
+                                        profiles = searchViewModel.activeCreators,
+                                        isDarkMode = isDarkMode,
+                                        accentBlue = accentBlue,
+                                        onProfileClick = onProfileClick
+                                    )
                                 }
                             }
 
@@ -322,6 +340,7 @@ fun SearchScreen(
                                                 accentBlue, 
                                                 glassBg, 
                                                 glassBorder, 
+                                                currentUserId = currentUserId,
                                                 onProfileClick = {
                                                     searchViewModel.recordUserSelection(profile)
                                                     onProfileClick(profile.username)
@@ -417,9 +436,13 @@ fun SearchScreen(
 }
 
 @Composable
-fun CreatorsLoopPager(isDarkMode: Boolean, accentBlue: Color, onProfileClick: (String) -> Unit) {
-    val searchViewModel: SearchViewModel = viewModel()
-    val pagerState = rememberPagerState(pageCount = { searchViewModel.activeCreators.size })
+fun CreatorsLoopPager(
+    profiles: List<RecommendedProfile>,
+    isDarkMode: Boolean,
+    accentBlue: Color,
+    onProfileClick: (String) -> Unit
+) {
+    val pagerState = rememberPagerState(pageCount = { profiles.size })
     
     HorizontalPager(
         state = pagerState,
@@ -431,7 +454,7 @@ fun CreatorsLoopPager(isDarkMode: Boolean, accentBlue: Color, onProfileClick: (S
             (pagerState.currentPage - page) + pagerState.currentPageOffsetFraction
         ).absoluteValue
 
-        val profile = searchViewModel.activeCreators[page]
+        val profile = profiles[page]
 
         CreatorsLoopCard(
             profile = profile,
@@ -598,12 +621,14 @@ fun RecommendedProfileCard(
     accentBlue: Color,
     glassBg: Color,
     glassBorder: Color,
+    currentUserId: String? = null,
     onProfileClick: () -> Unit,
     onFollowClick: (String) -> Unit = {}
 ) {
     val searchViewModel: SearchViewModel = viewModel()
     val isPending = profile.backendId != null && searchViewModel.pendingFollowIds.contains(profile.backendId)
-    val followStatus = profile.followStatus.lowercase().ifBlank {
+    val isOwnProfile = !currentUserId.isNullOrBlank() && profile.backendId == currentUserId
+    val followStatus = if (isOwnProfile) "self" else profile.followStatus.lowercase().ifBlank {
         if (profile.isFollowed) "following" else "not_following"
     }
     val buttonText = when (followStatus) {
@@ -674,8 +699,10 @@ fun RecommendedProfileCard(
             }
             
             Surface(
-                onClick = { 
-                    profile.backendId?.let { onFollowClick(it) }
+                onClick = {
+                    if (!isOwnProfile) {
+                        profile.backendId?.let { onFollowClick(it) }
+                    }
                 },
                 modifier = Modifier
                     .fillMaxWidth()
@@ -837,15 +864,17 @@ fun CreatorsLoopCard(profile: RecommendedProfile, isDarkMode: Boolean, accentBlu
 
 @Composable
 fun TrendingLoopItem(index: Int, post: PostData, isDarkMode: Boolean, hasEmoji: Boolean, modifier: Modifier = Modifier) {
+    val mediaAspectRatio = (post.mediaAspectRatio ?: if (post.isVideo) 9f / 16f else 1f)
+        .coerceIn(0.56f, 1.25f)
     Column(modifier = modifier) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(1f)
+                .aspectRatio(mediaAspectRatio)
                 .clip(RoundedCornerShape(24.dp))
         ) {
             AppBanner(
-                imageModel = post.image,
+                imageModel = post.thumbnailUrl ?: post.image,
                 title = post.user,
                 modifier = Modifier.fillMaxSize(),
                 isDarkMode = isDarkMode,
@@ -904,6 +933,7 @@ fun SearchPostDetailFeed(
     onBack: () -> Unit,
     onProfileClick: (String) -> Unit,
     onCommentsClick: (PostData) -> Unit,
+    currentUserId: String? = null,
     onToggleLike: (PostData) -> Unit,
     onToggleSave: (PostData) -> Unit
 ) {
@@ -948,6 +978,7 @@ fun SearchPostDetailFeed(
                         isDarkMode = isDarkMode,
                         onCommentsClick = onCommentsClick,
                         onProfileClick = { onProfileClick(post.user) },
+                        currentUserId = currentUserId,
                         onToggleLike = onToggleLike,
                         onToggleSave = onToggleSave
                     )

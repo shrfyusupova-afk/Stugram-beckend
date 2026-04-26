@@ -23,6 +23,9 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
 import com.stugram.app.navigation.AuthNavGraph
 import com.stugram.app.navigation.Screen
+import com.stugram.app.core.messaging.ChatOutboxScheduler
+import com.stugram.app.core.network.BackendKeepAlive
+import com.stugram.app.core.network.BackendWarmupScheduler
 import com.stugram.app.data.remote.RetrofitClient
 import com.stugram.app.ui.theme.MyApplicationTheme
 import java.security.MessageDigest
@@ -46,6 +49,9 @@ class MainActivity : ComponentActivity() {
         
         printSHA1()
         RetrofitClient.init(applicationContext)
+        BackendWarmupScheduler.schedule(applicationContext)
+        BackendKeepAlive.start(applicationContext)
+        ChatOutboxScheduler.schedule(applicationContext)
         enableEdgeToEdge()
         askNotificationPermission()
         
@@ -77,6 +83,18 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        BackendWarmupScheduler.schedule(applicationContext)
+        BackendKeepAlive.start(applicationContext)
+        ChatOutboxScheduler.schedule(applicationContext)
+    }
+
+    override fun onStop() {
+        BackendKeepAlive.stop()
+        super.onStop()
     }
 
     private fun askNotificationPermission() {

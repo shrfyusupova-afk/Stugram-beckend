@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import android.widget.Toast
+import android.util.Log
 import org.json.JSONObject
 import java.util.UUID
 import com.stugram.app.core.storage.TokenManager
@@ -61,12 +62,22 @@ import com.stugram.app.data.remote.model.DirectConversationModel
 import com.stugram.app.data.remote.model.ChatMessageModel
 import com.stugram.app.data.repository.ProfileRepository
 import com.stugram.app.data.repository.ChatRepository
+import com.stugram.app.data.repository.ChatPendingOutbox
+import com.stugram.app.data.repository.ChatLocalCache
 import com.stugram.app.data.repository.GroupChatRepository
 import com.stugram.app.data.repository.MessagesInboxCache
+import com.stugram.app.data.repository.PendingChatEnvelope
+import com.stugram.app.data.repository.PendingChatPayload
+import com.stugram.app.domain.chat.ChatMessageSnapshot
+import com.stugram.app.domain.chat.ChatMessageStatus
+import com.stugram.app.domain.chat.ChatReducer
+import com.stugram.app.domain.chat.MessageSource
 import com.stugram.app.data.remote.model.ProfileModel
 import com.stugram.app.ui.theme.IosEmojiFont
 import com.stugram.app.ui.theme.PremiumBlue
 import androidx.compose.ui.res.painterResource
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -75,6 +86,8 @@ import com.stugram.app.core.notification.PushNotificationBus
 import com.stugram.app.core.notification.ForegroundChatRegistry
 import com.stugram.app.core.messaging.ForwardDraft
 import com.stugram.app.core.messaging.ForwardDraftStore
+import com.stugram.app.core.messaging.ChatOutboxScheduler
+import com.stugram.app.core.socket.UserPresenceState
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -87,22 +100,38 @@ fun ChatDetailScreen(
     onBack: () -> Unit,
     isRequest: Boolean = false,
     onNavigateToChat: (String, String, Boolean) -> Unit = { _, _, _ -> },
-    onNavigateToGroupChat: (String, String) -> Unit = { _, _ -> }
+    onNavigateToGroupChat: (String, String) -> Unit = { _, _ -> },
+    onNavigateToPost: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
-    val tokenManager = remember { TokenManager(context.applicationContext) }
-    val chatSocketManager = remember { ChatSocketManager.getInstance(tokenManager) }
-    val profileRepository = remember { ProfileRepository() }
+    val application = context.applicationContext as android.app.Application
+    val directViewModel: DirectChatViewModel = viewModel(
+        factory = DirectChatViewModel.factory(
+            application = application,
+            conversationId = conversationId,
+            userName = userName,
+            isRequest = isRequest
+        )
+    )
+    val state by directViewModel.uiState.collectAsStateWithLifecycle()
     val chatRepository = remember {
         RetrofitClient.init(context.applicationContext)
         ChatRepository()
     }
     val groupChatRepository = remember { GroupChatRepository() }
-    val currentUser by tokenManager.currentUser.collectAsState(initial = null)
-    val forwardDraft by ForwardDraftStore.draft.collectAsState(initial = null)
-    val remoteProfile by produceState<ProfileModel?>(initialValue = null, key1 = userName) {
-        value = runCatching { profileRepository.getProfile(userName).body()?.data }.getOrNull()
-    }
+    val currentUser = state.currentUser
+    val forwardDraft = state.forwardDraft
+    val remoteProfile = state.remoteProfile
+    val remotePresence = state.remotePresence
+    val conversationDetail = state.conversationDetail
+    val messages = state.messages
+    val messageText = state.composerText
+    val isInitialLoading = state.isInitialLoading
+    val isLoadingMore = state.isLoadingMore
+    val loadError = state.error?.message
+    val isMuted = state.isMuted
+    val isTyping = state.typingState is ChatTypingState.Direct
+    val typingUser = (state.typingState as? ChatTypingState.Direct)?.username
     val backgroundColor = if (isDarkMode) Color.Black else Color.White
     val contentColor = if (isDarkMode) Color.White else Color.Black
     val glassBorder = if (isDarkMode) Color.White.copy(alpha = 0.15f) else Color.Black.copy(0.1f)
@@ -110,259 +139,98 @@ fun ChatDetailScreen(
     val keyboardController = LocalSoftwareKeyboardController.current
     
     val headerHeight = 110.dp
-
-    var messageText by remember { mutableStateOf("") }
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val pinnedBannerTop = statusBarTop + 64.dp
     
     var showChatInfo by remember { mutableStateOf(false) }
-    var isMuted by remember(conversationId) { mutableStateOf(false) }
     var showSearchModal by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
-    var searchResults by remember(conversationId) { mutableStateOf<List<MessageData>>(emptyList()) }
-    var searchLoading by remember { mutableStateOf(false) }
-    var searchError by remember { mutableStateOf<String?>(null) }
     var showMemberProfile by remember { mutableStateOf(false) }
     var replyingToMessage by remember(conversationId) { mutableStateOf<MessageData?>(null) }
     var selectedMessageForActions by remember(conversationId) { mutableStateOf<MessageData?>(null) }
     var messageBounds by remember(conversationId) { mutableStateOf<Map<String, Rect>>(emptyMap()) }
     var editingMessage by remember(conversationId) { mutableStateOf<MessageData?>(null) }
-    var conversationDetail by remember(conversationId) { mutableStateOf<DirectConversationModel?>(null) }
     var showForwardPicker by remember(conversationId) { mutableStateOf(false) }
     var forwardSourceMessage by remember(conversationId) { mutableStateOf<MessageData?>(null) }
     var showDeleteDialogFor by remember(conversationId) { mutableStateOf<MessageData?>(null) }
     var deleteForEveryone by remember(conversationId) { mutableStateOf(false) }
     var highlightedMessageId by remember(conversationId) { mutableStateOf<String?>(null) }
-    
-    var isTyping by remember { mutableStateOf(false) }
-    var typingUser by remember { mutableStateOf<String?>(null) }
     var isMemberProfileRefreshing by remember { mutableStateOf(false) }
-
-    var messages by remember(conversationId) { mutableStateOf(listOf<MessageData>()) }
     var animatedMessageIds by remember(conversationId) { mutableStateOf(setOf<String>()) }
-    var page by remember(conversationId) { mutableIntStateOf(1) }
-    var totalPages by remember(conversationId) { mutableIntStateOf(1) }
-    var isInitialLoading by remember(conversationId) { mutableStateOf(false) }
-    var isLoadingMore by remember(conversationId) { mutableStateOf(false) }
-    var loadError by remember(conversationId) { mutableStateOf<String?>(null) }
+    var pendingOutgoingEntryAnimation by remember(conversationId) { mutableStateOf(false) }
+    var unseenNewMessages by remember(conversationId) { mutableIntStateOf(0) }
+    var stickToLatest by remember(conversationId) { mutableStateOf(true) }
+    var lastRenderedMessageKey by remember(conversationId) { mutableStateOf<String?>(null) }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-
-    fun mergeMessages(existing: List<MessageData>, incoming: List<MessageData>): List<MessageData> {
-        // Source of truth: backend IDs + createdAt. Socket messages merge in without duplicates.
-        val byBackendId = LinkedHashMap<String, MessageData>(existing.size + incoming.size)
-        fun put(msg: MessageData) {
-            val key = msg.backendId ?: return
-            val prev = byBackendId[key]
-            if (prev == null) {
-                byBackendId[key] = msg
+    val unseenIncomingMessageKey = remember(messages) {
+        messages
+            .filter { !it.isMe && it.status != MessageStatus.SEEN }
+            .mapNotNull { it.backendId }
+            .distinct()
+            .joinToString("|")
+    }
+    val isAtLatest by remember(messages, listState) {
+        derivedStateOf {
+            if (messages.isEmpty()) {
+                true
             } else {
-                byBackendId[key] = prev.mergeFrom(msg)
+                val latestIndex = messages.lastIndex
+                listState.layoutInfo.visibleItemsInfo.any { item -> item.index >= latestIndex - 1 }
             }
         }
-        existing.forEach(::put)
-        incoming.forEach(::put)
-        return byBackendId.values
-            .sortedWith(compareBy<MessageData> { it.timestamp }.thenBy { it.backendId ?: "" }) // ASC by server time
     }
 
-    fun removeOptimisticMessage(tempBackendId: String) {
-        messages = messages.filterNot { it.backendId == tempBackendId }
-    }
-
-    fun finalizeOptimisticMessage(tempBackendId: String, sentMessage: MessageData) {
-        removeOptimisticMessage(tempBackendId)
-        messages = mergeMessages(messages, listOf(sentMessage))
-    }
-
-    fun buildOptimisticMessage(
-        tempBackendId: String,
-        text: String,
-        replyPreview: String? = null,
-        messageType: String = "text",
-        media: ChatMediaUi? = null
-    ): MessageData {
-        return MessageData(
-            id = tempBackendId.hashCode(),
-            backendId = tempBackendId,
-            text = text,
-            isMe = true,
-            senderId = currentUser?.id,
-            isNew = true,
-            timestamp = System.currentTimeMillis(),
-            status = MessageStatus.SENT,
-            senderName = currentUser?.fullName ?: currentUser?.username,
-            messageType = messageType,
-            media = media,
-            replyPreview = replyPreview
-        )
-    }
-
-    suspend fun loadMessages(targetPage: Int, append: Boolean) {
-        if (conversationId.isBlank() || isRequest) {
-            messages = emptyList()
-            loadError = null
-            return
+    LaunchedEffect(unseenIncomingMessageKey) {
+        if (unseenIncomingMessageKey.isNotBlank()) {
+            delay(180)
+            directViewModel.onAction(DirectChatAction.MarkVisibleMessagesSeen)
         }
-        if (append) isLoadingMore = true else isInitialLoading = true
-        loadError = null
-        runCatching {
-            chatRepository.getConversationMessages(conversationId, targetPage, 30)
-        }.onSuccess { response ->
-            val body = response.body()
-            if (response.isSuccessful && body != null) {
-                val newItems = body.data
-                    .map { it.toUiMessage(currentUser?.id) }
-                    .filter { it.text.isNotBlank() || it.media != null || !it.replyPreview.isNullOrBlank() }
-                messages = mergeMessages(messages, newItems)
-                page = body.meta?.page ?: targetPage
-                totalPages = body.meta?.totalPages ?: 1
-                val unseenIncoming = newItems.filter { !it.isMe && it.status != MessageStatus.READ }
-                unseenIncoming.forEach { message ->
-                    message.backendId?.let { backendId ->
-                        runCatching { chatRepository.markMessageSeen(backendId) }
-                    }
+    }
+
+    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
+        if (isAtLatest) {
+            stickToLatest = true
+            unseenNewMessages = 0
+        } else if (messages.isNotEmpty()) {
+            stickToLatest = false
+        }
+    }
+
+    LaunchedEffect(messages.lastOrNull()?.stableKeyVm) {
+        val latest = messages.lastOrNull() ?: run {
+            lastRenderedMessageKey = null
+            return@LaunchedEffect
+        }
+        val latestKey = latest.stableKeyVm
+        if (latestKey != lastRenderedMessageKey) {
+            val previousKey = lastRenderedMessageKey
+            val shouldScroll = stickToLatest || latest.isMe
+            if (previousKey != null) {
+                animatedMessageIds = animatedMessageIds + latestKey
+                scope.launch {
+                    delay(620)
+                    animatedMessageIds = animatedMessageIds - latestKey
                 }
+            }
+            if (latest.isMe && pendingOutgoingEntryAnimation) {
+                pendingOutgoingEntryAnimation = false
+            }
+            lastRenderedMessageKey = latestKey
+            if (shouldScroll) {
+                listState.animateScrollToItem(messages.lastIndex)
+                stickToLatest = true
+                unseenNewMessages = 0
             } else {
-                loadError = response.apiErrorMessage("Could not load conversation")
-                if (!append) messages = emptyList()
-            }
-        }.onFailure {
-            loadError = it.message
-            if (!append) messages = emptyList()
-        }
-        isInitialLoading = false
-        isLoadingMore = false
-    }
-
-    LaunchedEffect(conversationId, isRequest, currentUser?.id) {
-        page = 1
-        totalPages = 1
-        loadMessages(targetPage = 1, append = false)
-        
-        if (!isRequest && conversationId.isNotBlank()) {
-            chatSocketManager.connect()
-            chatSocketManager.joinConversation(conversationId)
-            conversationDetail = runCatching { chatRepository.getConversationDetail(conversationId).body()?.data }.getOrNull()
-        }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-        
-        chatSocketManager.newMessages.collect { socketMessage ->
-            if (socketMessage.conversation == conversationId) {
-                val uiMessage = socketMessage.toUiMessage(currentUser?.id)
-                messages = mergeMessages(messages, listOf(uiMessage))
+                unseenNewMessages += 1
             }
         }
     }
 
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-
-        chatSocketManager.messageSeenEvents.collect { event ->
-            if (event.conversationId == conversationId) {
-                messages = mergeMessages(messages, listOf(event.message.toUiMessage(currentUser?.id)))
-            }
-        }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-
-        chatSocketManager.messageReactionEvents.collect { event ->
-            if (event.conversationId == conversationId) {
-                messages = mergeMessages(messages, listOf(event.message.toUiMessage(currentUser?.id)))
-            }
-        }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-
-        chatSocketManager.messageEditedEvents.collect { event ->
-            if (event.conversationId == conversationId) {
-                messages = mergeMessages(messages, listOf(event.message.toUiMessage(currentUser?.id)))
-            }
-        }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-
-        chatSocketManager.messageForwardedEvents.collect { event ->
-            if (event.conversationId == conversationId) {
-                messages = mergeMessages(messages, listOf(event.message.toUiMessage(currentUser?.id)))
-            }
-        }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-
-        chatSocketManager.messageDeletedEvents.collect { event ->
-            if (event.conversationId == conversationId) {
-                messages = messages.filterNot { it.backendId == event.messageId }
-            }
-        }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-
-        chatSocketManager.messageDeletedForEveryoneEvents.collect { event ->
-            if (event.conversationId == conversationId) {
-                messages = mergeMessages(messages, listOf(event.message.toUiMessage(currentUser?.id)))
-            }
-        }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-
-        chatSocketManager.conversationUpdates.collect { updatedConversation ->
-            if (updatedConversation.id == conversationId) {
-                conversationDetail = updatedConversation
-                loadMessages(targetPage = 1, append = false)
-            }
-        }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-        
-        chatSocketManager.typingEvents.collect { event ->
-            if (event.conversationId == conversationId) {
-                isTyping = event.isTyping
-                typingUser = if (event.isTyping) event.username else null
-            }
-        }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-
-        PushNotificationBus.events.collect { event ->
-            if (event.conversationId == conversationId) {
-                loadMessages(targetPage = 1, append = false)
-            }
-        }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isBlank() || isRequest) return@LaunchedEffect
-        chatSocketManager.connectionEvents.collect { event ->
-            if (event is com.stugram.app.core.socket.SocketConnectionEvent.Reconnected) {
-                // On reconnect, pull latest server history to recover missed messages and seen states.
-                loadMessages(targetPage = 1, append = false)
-            }
-        }
-    }
-
-    // Pagination trigger: when user scrolls near the top (older messages).
-    LaunchedEffect(listState.firstVisibleItemIndex, isLoadingMore, page, totalPages) {
-        if (!isInitialLoading && !isLoadingMore && page < totalPages && listState.firstVisibleItemIndex <= 2 && messages.isNotEmpty()) {
-            loadMessages(targetPage = page + 1, append = true)
+    LaunchedEffect(listState.firstVisibleItemIndex, isLoadingMore, state.hasMore, messages.size) {
+        if (!isInitialLoading && !isLoadingMore && state.hasMore && listState.firstVisibleItemIndex <= 2 && messages.isNotEmpty()) {
+            directViewModel.onAction(DirectChatAction.LoadMore)
         }
     }
 
@@ -378,33 +246,16 @@ fun ChatDetailScreen(
             if (ForegroundChatRegistry.activeConversationId == conversationId) {
                 ForegroundChatRegistry.activeConversationId = null
             }
-            if (!isRequest && conversationId.isNotBlank()) {
-                chatSocketManager.sendTypingStop(conversationId = conversationId)
-            }
         }
     }
 
-    var lastTypingSentAt by remember { mutableLongStateOf(0L) }
-    fun handleTyping(newText: String) {
-        if (!isRequest && conversationId.isNotBlank()) {
-            if (newText.isBlank()) {
-                chatSocketManager.sendTypingStop(conversationId = conversationId)
-                lastTypingSentAt = 0L
-            } else {
-                val now = System.currentTimeMillis()
-                if (now - lastTypingSentAt > 3000) {
-                    chatSocketManager.sendTypingStart(conversationId = conversationId)
-                    lastTypingSentAt = now
-                }
-            }
-        }
-    }
+    val clipboardManager = LocalClipboardManager.current
 
     Box(modifier = Modifier.fillMaxSize().background(backgroundColor)) {
-        val clipboardManager = LocalClipboardManager.current
         val activeForwardDraft = forwardDraft?.takeIf { it.targetConversationId == conversationId }
+        val pinnedMessage = conversationDetail?.pinnedMessage
         val firstUnreadIndex = remember(messages, currentUser?.id) {
-            messages.indexOfFirst { !it.isMe && it.status != MessageStatus.READ }
+            messages.indexOfFirst { !it.isMe && it.status != MessageStatus.SEEN }
         }
         val defaultWallpaperResId = remember(isDarkMode) {
             val resName = if (isDarkMode) "tun" else "kun"
@@ -438,9 +289,15 @@ fun ChatDetailScreen(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
                     reverseLayout = false,
-                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = headerHeight + 16.dp, bottom = 132.dp)
+                    verticalArrangement = Arrangement.Bottom,
+                    contentPadding = PaddingValues(
+                        start = 12.dp,
+                        end = 12.dp,
+                        top = if (pinnedMessage != null) pinnedBannerTop + 46.dp else headerHeight + 8.dp,
+                        bottom = 8.dp
+                    )
                 ) {
-                    if (isInitialLoading) {
+                    if (isInitialLoading && messages.isEmpty()) {
                         item("loading") {
                             Box(modifier = Modifier.fillMaxWidth().padding(top = 140.dp), contentAlignment = Alignment.Center) {
                                 CircularProgressIndicator(color = accentBlue)
@@ -455,7 +312,7 @@ fun ChatDetailScreen(
                             )
                         }
                     }
-                    itemsIndexed(messages, key = { _, msg -> msg.backendId ?: msg.id }) { index, message ->
+                    itemsIndexed(messages, key = { _, msg -> msg.stableKeyVm }) { index, message ->
                         val isSameDay = if (index > 0) {
                             isSameDay(message.timestamp, messages[index - 1].timestamp)
                         } else false
@@ -473,10 +330,16 @@ fun ChatDetailScreen(
                                 message = message,
                                 isDarkMode = isDarkMode,
                                 currentUserId = currentUser?.id,
-                                animateFromInput = message.backendId != null && animatedMessageIds.contains(message.backendId),
+                                animateFromInput = animatedMessageIds.contains(message.stableKeyVm),
                                 highlighted = message.backendId != null && message.backendId == highlightedMessageId,
-                                onTap = { selectedMessageForActions = message },
+                                onRetry = {
+                                    (message.localId ?: message.backendId)?.let { retryId ->
+                                        directViewModel.onAction(DirectChatAction.Retry(retryId))
+                                    }
+                                },
+                                onTap = { },
                                 onLongPress = { selectedMessageForActions = message },
+                                onNavigateToPost = onNavigateToPost,
                                 onGloballyPositioned = { coords ->
                                     message.backendId?.let { backendId ->
                                         messageBounds = messageBounds + (backendId to coords.boundsInWindow())
@@ -487,6 +350,31 @@ fun ChatDetailScreen(
                     }
                 }
 
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 16.dp)
+                ) {
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = unseenNewMessages > 0 && !isAtLatest,
+                        enter = fadeIn(tween(120)) + slideInVertically(tween(160)) { it / 2 },
+                        exit = fadeOut(tween(100)) + slideOutVertically(tween(120)) { it / 2 }
+                    ) {
+                        JumpToLatestChip(
+                            count = unseenNewMessages,
+                            isDarkMode = isDarkMode,
+                            onClick = {
+                                scope.launch {
+                                    if (messages.isNotEmpty()) {
+                                        listState.animateScrollToItem(messages.lastIndex)
+                                        unseenNewMessages = 0
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+
                 // --- TOP AREA (Liquid Glass Header) ---
                 Box(
                     modifier = Modifier
@@ -494,8 +382,8 @@ fun ChatDetailScreen(
                         .height(headerHeight)
                 ) {
                     val glassTint = if (isDarkMode) Color.Black else Color.White
-                    val blurMaskStart = if (isDarkMode) Color.Black.copy(alpha = 0.98f) else Color.White.copy(alpha = 0.94f)
-                    val blurMaskMid = if (isDarkMode) Color.Black.copy(alpha = 0.9f) else Color.White.copy(alpha = 0.88f)
+                    val blurMaskStart = if (isDarkMode) Color.Black.copy(alpha = 0.995f) else Color.White.copy(alpha = 0.98f)
+                    val blurMaskMid = if (isDarkMode) Color.Black.copy(alpha = 0.96f) else Color.White.copy(alpha = 0.94f)
 
                     // 1. Background with gradient blur (Thicker at top, invisible border at bottom)
                     Box(
@@ -515,14 +403,11 @@ fun ChatDetailScreen(
                                 )
                             }
                     ) {
-                        AppBanner(
-                            imageModel = remoteProfile?.banner,
-                            title = remoteProfile?.fullName ?: userName,
+                        Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .blur(80.dp),
-                            isDarkMode = isDarkMode,
-                            colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
+                                .blur(80.dp)
+                                .background(glassTint.copy(alpha = if (isDarkMode) 0.88f else 0.82f))
                         )
                     }
 
@@ -533,7 +418,7 @@ fun ChatDetailScreen(
                             .background(
                                 Brush.verticalGradient(
                                     0.0f to glassTint.copy(alpha = if (isDarkMode) 0.22f else 0.16f),
-                                    0.6f to glassTint.copy(alpha = if (isDarkMode) 0.1f else 0.07f),
+                                    0.6f to glassTint.copy(alpha = if (isDarkMode) 0.34f else 0.28f),
                                     1.0f to Color.Transparent
                                 )
                             )
@@ -572,6 +457,12 @@ fun ChatDetailScreen(
                             username = remoteProfile?.username ?: userName,
                             isTyping = isTyping,
                             isRequest = isRequest,
+                            presenceSubtitle = directPresenceSubtitle(
+                                isTyping = isTyping,
+                                username = remoteProfile?.username ?: userName,
+                                presence = remotePresence
+                            ),
+                            isOnline = remotePresence?.isOnline == true,
                             isDarkMode = isDarkMode,
                             onClick = {
                                 keyboardController?.hide()
@@ -584,6 +475,7 @@ fun ChatDetailScreen(
                             profile = remoteProfile,
                             isDarkMode = isDarkMode,
                             contentColor = contentColor,
+                            isOnline = remotePresence?.isOnline == true,
                             onClick = {
                                 keyboardController?.hide()
                                 showMemberProfile = true
@@ -591,37 +483,39 @@ fun ChatDetailScreen(
                             modifier = Modifier.align(Alignment.CenterEnd)
                         )
                     }
-            }
-        }
+                }
 
-        AnimatedVisibility(
-            visible = conversationDetail?.pinnedMessage != null,
-            enter = fadeIn(tween(120)) + expandVertically(tween(120)),
-            exit = fadeOut(tween(120)) + shrinkVertically(tween(120)),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = headerHeight + 10.dp, start = 12.dp, end = 12.dp)
-        ) {
-            conversationDetail?.pinnedMessage?.let { pinned ->
-                PinnedMessageBanner(
-                    title = pinned.sender?.fullName?.takeIf { it.isNotBlank() } ?: pinned.sender?.username ?: "Pinned message",
-                    text = pinned.text?.takeIf { it.isNotBlank() }
-                        ?: pinned.replyToMessage?.text
-                        ?: if (pinned.media != null) "Media message" else "Pinned content",
-                    isDarkMode = isDarkMode,
-                    onClick = {
-                        val targetId = pinned.id
-                        val index = messages.indexOfFirst { it.backendId == targetId }
-                        if (index >= 0) {
-                            highlightedMessageId = targetId
-                            scope.launch {
-                                listState.animateScrollToItem(index)
-                                delay(1000)
-                                if (highlightedMessageId == targetId) highlightedMessageId = null
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = pinnedMessage != null,
+                    enter = fadeIn(tween(120)) + expandVertically(tween(120)),
+                    exit = fadeOut(tween(120)) + shrinkVertically(tween(120)),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(top = pinnedBannerTop, start = 12.dp, end = 12.dp)
+                ) {
+                    pinnedMessage?.let { pinned ->
+                        PinnedMessageBanner(
+                            title = pinned.sender?.fullName?.takeIf { it.isNotBlank() } ?: pinned.sender?.username ?: "Pinned message",
+                            text = pinned.text?.takeIf { it.isNotBlank() }
+                                ?: pinned.replyToMessage?.text
+                                ?: if (pinned.media != null) "Media message" else "Pinned content",
+                            isDarkMode = isDarkMode,
+                            onClick = {
+                                val targetId = pinned.id
+                                val index = messages.indexOfFirst { it.backendId == targetId }
+                                if (index >= 0) {
+                                    highlightedMessageId = targetId
+                                    scope.launch {
+                                        listState.animateScrollToItem(index)
+                                        delay(1000)
+                                        if (highlightedMessageId == targetId) highlightedMessageId = null
+                                    }
+                                }
                             }
-                        }
+                        )
                     }
-                )
+                }
             }
         }
 
@@ -632,35 +526,15 @@ fun ChatDetailScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .navigationBarsPadding()
                             .imePadding()
+                            .navigationBarsPadding()
                     ) {
-                    val glassTint = if (isDarkMode) Color.Black else Color.White
-
-                    // 1. Glass Opacity Layer
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(140.dp)
-                            .align(Alignment.BottomCenter)
-                            .background(
-                                Brush.verticalGradient(
-                                    0.0f to Color.Transparent,
-                                    0.4f to glassTint.copy(alpha = if (isDarkMode) 0.14f else 0.08f),
-                                    1.0f to glassTint.copy(alpha = if (isDarkMode) 0.22f else 0.14f)
-                                )
-                            )
-                    )
-
-                    // 3. The Input Row itself
+                    // The input is pinned directly to the bottom; the composer owns its own glass.
                     RichChatComposer(
                         isDarkMode = isDarkMode,
                         textValue = messageText,
                         onTextValueChange = {
-                            messageText = it
-                            handleTyping(it)
-                            // Keep typing anchored near bottom (latest).
-                            scope.launch { scrollToBottom() }
+                            directViewModel.onAction(DirectChatAction.ComposerChanged(it))
                         },
                         replyPreviewText = when {
                             editingMessage != null -> "Editing message"
@@ -675,7 +549,7 @@ fun ChatDetailScreen(
                         onCancelReply = {
                             if (editingMessage != null) {
                                 editingMessage = null
-                                messageText = ""
+                                directViewModel.onAction(DirectChatAction.ComposerChanged(""))
                             } else if (activeForwardDraft != null) {
                                 ForwardDraftStore.clear()
                             } else {
@@ -689,17 +563,14 @@ fun ChatDetailScreen(
                                 val backendId = target.backendId ?: return@RichChatComposer
                                 if (text.isNotBlank()) {
                                     scope.launch {
-                                        val response = runCatching {
-                                            chatRepository.editMessage(backendId, text)
-                                        }.getOrNull()
-                                        val updated = response?.body()?.data
-                                        if (response?.isSuccessful == true && updated != null) {
-                                            messages = mergeMessages(messages, listOf(updated.toUiMessage(currentUser?.id)))
-                                            editingMessage = null
-                                            messageText = ""
-                                            selectedMessageForActions = null
-                                        } else {
-                                            Toast.makeText(context, response.apiErrorMessage("Could not edit message"), Toast.LENGTH_SHORT).show()
+                                        directViewModel.editMessage(backendId, text) { success, error ->
+                                            if (success) {
+                                                editingMessage = null
+                                                directViewModel.onAction(DirectChatAction.ComposerChanged(""))
+                                                selectedMessageForActions = null
+                                            } else {
+                                                Toast.makeText(context, error ?: "Could not edit message", Toast.LENGTH_SHORT).show()
+                                            }
                                         }
                                     }
                                 }
@@ -707,162 +578,46 @@ fun ChatDetailScreen(
                                 val sourceMessageId = activeForwardDraft.sourceMessageId
                                 if (sourceMessageId.isNotBlank()) {
                                     scope.launch {
-                                        val response = runCatching {
-                                            chatRepository.forwardMessage(
-                                                conversationId = conversationId,
-                                                sourceMessageId = sourceMessageId,
-                                                comment = text.takeIf { it.isNotBlank() }
-                                            )
-                                        }.getOrNull()
-                                        val sent = response?.body()?.data
-                                        if (response?.isSuccessful == true && sent != null) {
-                                            messages = mergeMessages(messages, listOf(sent.toUiMessage(currentUser?.id)))
-                                            animatedMessageIds = animatedMessageIds + sent.id
-                                            messageText = ""
-                                            ForwardDraftStore.clear()
-                                            scope.launch { scrollToBottom() }
-                                            delay(260)
-                                            animatedMessageIds = animatedMessageIds - sent.id
-                                        } else {
-                                            Toast.makeText(context, response?.message().orEmpty().ifBlank { "Could not forward message" }, Toast.LENGTH_SHORT).show()
+                                        directViewModel.forwardMessage(sourceMessageId, text.takeIf { it.isNotBlank() }) { success, error ->
+                                            if (success) {
+                                                directViewModel.onAction(DirectChatAction.ComposerChanged(""))
+                                                scope.launch { scrollToBottom() }
+                                            } else {
+                                                Toast.makeText(context, error ?: "Could not forward message", Toast.LENGTH_SHORT).show()
+                                            }
                                         }
                                     }
                                 }
                             } else if (text.isNotBlank()) {
-                                val tempBackendId = "local-${UUID.randomUUID()}"
                                 val replyTargetId = replyingToMessage?.backendId
-                                val optimisticReplyPreview = replyingToMessage?.text?.takeIf { value -> value.isNotBlank() }
-                                    ?: replyingToMessage?.replyPreview
-                                val optimistic = buildOptimisticMessage(
-                                    tempBackendId = tempBackendId,
-                                    text = text,
-                                    replyPreview = optimisticReplyPreview
-                                )
-                                messages = mergeMessages(messages, listOf(optimistic))
-                                animatedMessageIds = animatedMessageIds + tempBackendId
-                                messageText = ""
                                 replyingToMessage = null
+                                pendingOutgoingEntryAnimation = true
                                 scope.launch { scrollToBottom() }
-                                scope.launch {
-                                    val response = runCatching {
-                                        chatRepository.sendMessage(
-                                            conversationId = conversationId,
-                                            request = com.stugram.app.data.remote.model.SendChatMessageRequest(
-                                                text = text,
-                                                replyToMessageId = replyTargetId
-                                            )
-                                        )
-                                    }.getOrNull()
-                                    val sent = response?.body()?.data
-                                    if (response?.isSuccessful == true && sent != null) {
-                                        finalizeOptimisticMessage(tempBackendId, sent.toUiMessage(currentUser?.id))
-                                        animatedMessageIds = animatedMessageIds - tempBackendId + sent.id
-                                        scope.launch { scrollToBottom() }
-                                        kotlinx.coroutines.delay(260)
-                                        animatedMessageIds = animatedMessageIds - sent.id
-                                    } else {
-                                        removeOptimisticMessage(tempBackendId)
-                                        animatedMessageIds = animatedMessageIds - tempBackendId
-                                        val errorMessage = when {
-                                            response == null -> "Could not send message"
-                                            response.code() == 401 -> "Session expired. Please sign in again."
-                                            else -> response.apiErrorMessage("Could not send message")
-                                        }
-                                        Toast.makeText(context, errorMessage, Toast.LENGTH_SHORT).show()
-                                    }
-                                }
+                                directViewModel.onAction(DirectChatAction.SendText(text, replyTargetId))
                             }
                         },
                         onSendMedia = { uri, mimeType, messageTypeOverride, replyId ->
-                            val tempBackendId = "local-${UUID.randomUUID()}"
-                            val optimisticMessageType = messageTypeOverride ?: if (mimeType.startsWith("video")) "video" else "image"
-                            val optimistic = buildOptimisticMessage(
-                                tempBackendId = tempBackendId,
-                                text = "",
-                                replyPreview = replyingToMessage?.text?.takeIf { value -> value.isNotBlank() }
-                                    ?: replyingToMessage?.replyPreview,
-                                messageType = optimisticMessageType,
-                                media = ChatMediaUi(
-                                    url = uri.toString(),
-                                    type = optimisticMessageType,
-                                    fileName = uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
-                                        ?: if (mimeType.startsWith("video")) "Video" else "Image",
-                                    mimeType = mimeType
-                                )
-                            )
-                            messages = mergeMessages(messages, listOf(optimistic))
-                            animatedMessageIds = animatedMessageIds + tempBackendId
                             replyingToMessage = null
+                            pendingOutgoingEntryAnimation = true
                             scope.launch { scrollToBottom() }
-                            val response = runCatching {
-                                chatRepository.sendMediaMessage(context, conversationId, uri, mimeType, replyId, messageTypeOverride)
-                            }.getOrNull()
-                            val sent = response?.body()?.data
-                            if (response?.isSuccessful == true && sent != null) {
-                                finalizeOptimisticMessage(tempBackendId, sent.toUiMessage(currentUser?.id))
-                                animatedMessageIds = animatedMessageIds - tempBackendId + sent.id
-                                scope.launch { scrollToBottom() }
-                                kotlinx.coroutines.delay(260)
-                                animatedMessageIds = animatedMessageIds - sent.id
-                                true
-                            } else {
-                                removeOptimisticMessage(tempBackendId)
-                                animatedMessageIds = animatedMessageIds - tempBackendId
-                                val errorMessage = when {
-                                    response == null -> "Could not send media"
-                                    response.code() == 401 -> "Session expired. Please sign in again."
-                                    else -> response.apiErrorMessage("Could not send media")
-                                }
-                                Toast.makeText(context, errorMessage, Toast.LENGTH_SHORT).show()
-                                false
-                            }
+                            directViewModel.onAction(DirectChatAction.SendMedia(uri, mimeType, replyId))
+                            true
                         },
                         onSendStructured = { structuredText, replyId ->
-                            val tempBackendId = "local-${UUID.randomUUID()}"
-                            val optimistic = buildOptimisticMessage(
-                                tempBackendId = tempBackendId,
-                                text = structuredText,
-                                replyPreview = replyingToMessage?.text?.takeIf { value -> value.isNotBlank() }
-                                    ?: replyingToMessage?.replyPreview
-                            )
-                            messages = mergeMessages(messages, listOf(optimistic))
-                            animatedMessageIds = animatedMessageIds + tempBackendId
                             replyingToMessage = null
+                            pendingOutgoingEntryAnimation = true
                             scope.launch { scrollToBottom() }
-                            val response = runCatching {
-                                chatRepository.sendMessage(
-                                    conversationId = conversationId,
-                                    request = com.stugram.app.data.remote.model.SendChatMessageRequest(
-                                        text = structuredText,
-                                        replyToMessageId = replyId
-                                    )
-                                )
-                            }.getOrNull()
-                            val sent = response?.body()?.data
-                            if (response?.isSuccessful == true && sent != null) {
-                                finalizeOptimisticMessage(tempBackendId, sent.toUiMessage(currentUser?.id))
-                                animatedMessageIds = animatedMessageIds - tempBackendId + sent.id
-                                scope.launch { scrollToBottom() }
-                                kotlinx.coroutines.delay(260)
-                                animatedMessageIds = animatedMessageIds - sent.id
-                                true
-                            } else {
-                                removeOptimisticMessage(tempBackendId)
-                                animatedMessageIds = animatedMessageIds - tempBackendId
-                                val errorMessage = when {
-                                    response == null -> "Could not send message"
-                                    response.code() == 401 -> "Session expired. Please sign in again."
-                                    else -> response.apiErrorMessage("Could not send message")
-                                }
-                                Toast.makeText(context, errorMessage, Toast.LENGTH_SHORT).show()
-                                false
-                            }
+                            directViewModel.onAction(DirectChatAction.SendText(structuredText, replyId))
+                            true
                         },
                         replyToMessageId = replyingToMessage?.backendId,
                         sendEnabled = conversationId.isNotBlank(),
                         conversationId = conversationId,
                         isGroup = false,
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .padding(bottom = 0.dp)
                     )
                 }
             }
@@ -885,22 +640,13 @@ fun ChatDetailScreen(
                 },
                 onSearchClick = { showSearchModal = true },
                 onToggleMute = {
-                    scope.launch {
-                        val res = runCatching {
-                            if (isMuted) chatRepository.unmuteConversation(conversationId) else chatRepository.muteConversation(conversationId, durationMinutes = 60)
-                        }.getOrNull()
-                        if (res?.isSuccessful == true) {
-                            isMuted = !isMuted
-                        }
-                    }
+                    directViewModel.toggleMute()
                 },
                 onReport = {
-                    val uid = remoteProfile?.id ?: return@ChatInfoScreen
-                    scope.launch { runCatching { chatRepository.reportUser(uid, "inappropriate") } }
+                    directViewModel.reportUser()
                 },
                 onBlock = {
-                    val uid = remoteProfile?.id ?: return@ChatInfoScreen
-                    scope.launch { runCatching { chatRepository.blockUser(uid) } }
+                    directViewModel.blockUser()
                 }
             )
         }
@@ -917,62 +663,30 @@ fun ChatDetailScreen(
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
                         value = searchQuery,
-                        onValueChange = { searchQuery = it; searchError = null },
+                        onValueChange = {
+                            searchQuery = it
+                            directViewModel.updateSearchQuery(it)
+                        },
                         modifier = Modifier.fillMaxWidth(),
                         placeholder = { Text("Type keywords…") }
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        if (searchLoading) "Searching…" else "Search",
+                        if (state.searchLoading) "Searching…" else "Search",
                         color = accentBlue,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.clickable {
                             if (searchQuery.trim().isBlank()) return@clickable
-                            scope.launch {
-                                searchLoading = true
-                                searchError = null
-                                val res = runCatching { chatRepository.searchConversationMessages(conversationId, searchQuery.trim(), 1, 30) }.getOrNull()
-                                if (res?.isSuccessful == true) {
-                                    val mapped = res.body()?.data.orEmpty().map { api ->
-                                        MessageData(
-                                            id = api.id.hashCode(),
-                                            backendId = api.id,
-                                            isMe = api.sender?.id == currentUser?.id,
-                                            senderId = api.sender?.id,
-                                            text = api.text ?: "",
-                                            timestamp = runCatching { api.createdAt?.let { java.time.Instant.parse(it).toEpochMilli() } }.getOrNull()
-                                                ?: System.currentTimeMillis(),
-                                            senderName = api.sender?.username,
-                                            messageType = api.messageType,
-                                            media = api.media?.let { m -> ChatMediaUi(url = m.url, type = api.messageType) },
-                                            replyPreview = api.replyToMessage?.text,
-                                            status = if (api.seenBy.any { it == currentUser?.id }) MessageStatus.READ else MessageStatus.SENT,
-                                            reactions = api.reactions.map { reaction ->
-                                                MessageReactionUi(
-                                                    userId = reaction.user?.id,
-                                                    username = reaction.user?.username,
-                                                    fullName = reaction.user?.fullName,
-                                                    avatar = reaction.user?.avatar,
-                                                    emoji = reaction.emoji
-                                                )
-                                            }
-                                        )
-                                    }
-                                    searchResults = mapped
-                                } else {
-                                    searchError = res?.message()?.ifBlank { "Search failed" } ?: "Search failed"
-                                }
-                                searchLoading = false
-                            }
+                            directViewModel.searchMessages(searchQuery.trim())
                         }
                     )
-                    if (!searchError.isNullOrBlank()) {
+                    if (!state.searchError.isNullOrBlank()) {
                         Spacer(Modifier.height(10.dp))
-                        Text(searchError!!, color = Color.Red.copy(alpha = 0.8f), fontSize = 12.sp)
+                        Text(state.searchError!!, color = Color.Red.copy(alpha = 0.8f), fontSize = 12.sp)
                     }
                     Spacer(Modifier.height(12.dp))
                     LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
-                        items(searchResults, key = { it.backendId ?: it.id }) { msg ->
+                        items(state.searchResults, key = { it.backendId ?: it.id }) { msg ->
                             Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                                 Text(msg.senderName ?: "", fontWeight = FontWeight.Bold, color = contentColor, fontSize = 12.sp)
                                 Text(msg.text, color = contentColor.copy(alpha = 0.85f), fontSize = 14.sp, maxLines = 2)
@@ -1030,15 +744,7 @@ fun ChatDetailScreen(
                     anchorBounds = anchor,
                     onDismiss = { selectedMessageForActions = null },
                     onReactionSelected = { emoji ->
-                        scope.launch {
-                            runCatching { chatRepository.updateReaction(backendId, emoji) }
-                                .onSuccess { response ->
-                                    val updated = response.body()?.data
-                                    if (response.isSuccessful && updated != null) {
-                                        messages = mergeMessages(messages, listOf(updated.toUiMessage(currentUser?.id)))
-                                    }
-                                }
-                        }
+                        directViewModel.updateReaction(backendId, emoji)
                     },
                     onForward = {
                         if (backendId != null) {
@@ -1048,26 +754,13 @@ fun ChatDetailScreen(
                         }
                     },
                     onPinToggle = {
-                        scope.launch {
-                            runCatching {
-                                if (conversationDetail?.pinnedMessage?.id == backendId) {
-                                    chatRepository.unpinMessage(conversationId)
-                                } else {
-                                    chatRepository.pinMessage(conversationId, backendId)
-                                }
-                            }.onSuccess { response ->
-                                val updatedConversation = response.body()?.data
-                                if (response.isSuccessful && updatedConversation != null) {
-                                    conversationDetail = updatedConversation
-                                }
-                            }
-                        }
+                        directViewModel.togglePin(backendId)
                     },
                     onEditMessage = {
                         if (selectedMessage.isMe && selectedMessage.messageType == "text" && selectedMessage.text.isNotBlank()) {
                             editingMessage = selectedMessage
                             replyingToMessage = null
-                            messageText = selectedMessage.text
+                            directViewModel.onAction(DirectChatAction.ComposerChanged(selectedMessage.text))
                             selectedMessageForActions = null
                         }
                     },
@@ -1080,15 +773,7 @@ fun ChatDetailScreen(
                     },
                     onReadAt = if (selectedMessage.isMe) selectedMessage.readAt else null,
                     onRemoveReaction = {
-                        scope.launch {
-                            runCatching { chatRepository.removeReaction(backendId) }
-                                .onSuccess { response ->
-                                    val updated = response.body()?.data
-                                    if (response.isSuccessful && updated != null) {
-                                        messages = mergeMessages(messages, listOf(updated.toUiMessage(currentUser?.id)))
-                                    }
-                                }
-                        }
+                        directViewModel.removeReaction(backendId)
                     },
                     onDeleteMessage = if (canDelete) {
                         { showDeleteDialogFor = selectedMessage }
@@ -1109,20 +794,7 @@ fun ChatDetailScreen(
                 onConfirm = {
                     val target = showDeleteDialogFor ?: return@DeleteMessageDialog
                     val targetBackendId = target.backendId ?: return@DeleteMessageDialog
-                    val scopeValue = if (deleteForEveryone) "everyone" else "self"
-                    scope.launch {
-                        runCatching { chatRepository.deleteMessage(targetBackendId, scopeValue) }
-                            .onSuccess { response ->
-                                if (response.isSuccessful) {
-                                    val result = response.body()?.data
-                                    if (result?.deletedForEveryone == true) {
-                                        result.message?.let { messages = mergeMessages(messages, listOf(it.toUiMessage(currentUser?.id))) }
-                                    } else {
-                                        messages = messages.filterNot { it.backendId == targetBackendId }
-                                    }
-                                }
-                            }
-                    }
+                    directViewModel.deleteMessage(targetBackendId, deleteForEveryone)
                     showDeleteDialogFor = null
                     deleteForEveryone = false
                 }
@@ -1182,7 +854,6 @@ fun ChatDetailScreen(
         }
 
     }
-}
 
 @Composable
 fun MessageBubble(
@@ -1191,8 +862,10 @@ fun MessageBubble(
     currentUserId: String?,
     animateFromInput: Boolean,
     highlighted: Boolean = false,
+    onRetry: () -> Unit,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
+    onNavigateToPost: (String) -> Unit = {},
     onGloballyPositioned: (androidx.compose.ui.layout.LayoutCoordinates) -> Unit = {}
 ) {
     // Alignment is always based on senderId == currentUserId (never "flip" on reload).
@@ -1210,24 +883,27 @@ fun MessageBubble(
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     val timeString = timeFormat.format(Date(message.timestamp))
 
-    var runInputAnimation by remember(message.backendId, animateFromInput) { mutableStateOf(animateFromInput) }
+    var runInputAnimation by remember(message.stableKeyVm, animateFromInput) { mutableStateOf(animateFromInput) }
     val entryTranslation by animateFloatAsState(
-        targetValue = if (runInputAnimation) 56f else 0f,
-        animationSpec = tween(durationMillis = 230, easing = FastOutSlowInEasing),
+        targetValue = if (runInputAnimation) 72f else 0f,
+        animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing),
         label = "message_entry_translation"
     )
     val entryScale by animateFloatAsState(
-        targetValue = if (runInputAnimation) 0.96f else 1f,
-        animationSpec = tween(durationMillis = 230, easing = FastOutSlowInEasing),
+        targetValue = if (runInputAnimation) 0.92f else 1f,
+        animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing),
         label = "message_entry_scale"
     )
     val entryAlpha by animateFloatAsState(
-        targetValue = if (runInputAnimation) 0.55f else 1f,
-        animationSpec = tween(durationMillis = 230, easing = FastOutSlowInEasing),
+        targetValue = if (runInputAnimation) 0.05f else 1f,
+        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
         label = "message_entry_alpha"
     )
-    LaunchedEffect(message.backendId, animateFromInput) {
-        if (animateFromInput) runInputAnimation = false
+    LaunchedEffect(message.stableKeyVm, animateFromInput) {
+        if (animateFromInput) {
+            delay(18)
+            runInputAnimation = false
+        }
     }
 
     Column(
@@ -1259,43 +935,59 @@ fun MessageBubble(
             Box(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                 Column(modifier = Modifier.padding(end = 60.dp)) {
                     if (message.deletedGloballyAt != null) {
-                        Text(
-                            text = "This message was deleted",
-                            color = textColor.copy(alpha = 0.62f),
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(Icons.Default.Block, null, tint = textColor.copy(alpha = 0.5f), modifier = Modifier.size(14.dp))
+                            Text(
+                                text = "This message was deleted",
+                                color = textColor.copy(alpha = 0.62f),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     } else {
                     if (!message.replyPreview.isNullOrBlank()) {
-                            Text(
-                                text = message.replyPreview,
-                                color = textColor.copy(alpha = 0.65f),
-                                fontSize = 12.sp,
-                                lineHeight = 15.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .padding(bottom = 4.dp)
-                                .border(0.5.dp, textColor.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
-                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                        MessageContextPill(
+                            text = message.replyPreview,
+                            icon = Icons.AutoMirrored.Filled.Reply,
+                            textColor = textColor,
+                            accentColor = PremiumBlue,
+                            modifier = Modifier.padding(bottom = 4.dp)
                         )
                     }
                     if (message.forwardedFromMessageId != null) {
-                        Spacer(Modifier.height(2.dp))
-                        Text(
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.NearMe,
+                                contentDescription = null,
+                                tint = textColor.copy(alpha = 0.5f),
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
                             text = "Forwarded message",
                             color = textColor.copy(alpha = 0.52f),
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(bottom = 4.dp)
-                        )
+                            fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                     ChatMessageContent(
                         text = message.text,
                         messageType = message.messageType,
                         media = message.media,
                         isDarkMode = isDarkMode,
-                        preferLightContent = isMe
+                        preferLightContent = isMe,
+                        onOpenStructured = { payload ->
+                            if ((payload.type == ChatStructuredType.POST || payload.type == ChatStructuredType.REEL) && !payload.targetId.isNullOrBlank()) {
+                                onNavigateToPost(payload.targetId)
+                            }
+                        }
                     )
                     if (message.reactions.isNotEmpty()) {
                         Spacer(Modifier.height(8.dp))
@@ -1308,13 +1000,17 @@ fun MessageBubble(
                     }
                     if (message.editedAt != null) {
                         Spacer(Modifier.height(4.dp))
-                        Text(
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Icon(Icons.Default.Edit, null, tint = textColor.copy(alpha = 0.42f), modifier = Modifier.size(10.dp))
+                            Text(
                             text = "edited",
                             color = textColor.copy(alpha = 0.45f),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Medium
                         )
+                        }
                     }
+                    MessageLifecycleStrip(message.status, message.media != null, textColor, PremiumBlue)
                     }
                 }
 
@@ -1322,16 +1018,26 @@ fun MessageBubble(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.align(Alignment.BottomEnd)
                 ) {
-                    Text(text = timeString, color = textColor.copy(alpha = 0.5f), fontSize = 10.sp)
-                    if (isMe) {
-                        Spacer(Modifier.width(3.dp))
-                        Icon(
-                            imageVector = if (message.status == MessageStatus.READ) Icons.Default.DoneAll else Icons.Default.Done,
-                            contentDescription = null,
-                            tint = if (message.status == MessageStatus.READ) Color(0xFF4CAF50) else textColor.copy(alpha = 0.5f),
-                            modifier = Modifier.size(13.dp)
-                        )
-                    }
+                    MessageStatusFooter(
+                        status = message.status,
+                        timeString = timeString,
+                        isMe = isMe,
+                        textColor = textColor,
+                        accentColor = PremiumBlue,
+                        onRetry = onRetry,
+                        isGroupMessage = false
+                    )
+                }
+                if (message.status == MessageStatus.FAILED && !message.errorReason.isNullOrBlank()) {
+                    Text(
+                        text = message.errorReason,
+                        color = Color(0xFFFF8A80),
+                        fontSize = 10.sp,
+                        lineHeight = 12.sp,
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(top = 2.dp)
+                    )
                 }
             }
         }
@@ -1414,20 +1120,36 @@ fun PinnedMessageBanner(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = 42.dp, max = 46.dp)
             .clickable(onClick = onClick),
-        shape = RoundedCornerShape(16.dp),
-        color = if (isDarkMode) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.05f),
-        border = BorderStroke(0.5.dp, if (isDarkMode) Color.White.copy(alpha = 0.1f) else Color.Black.copy(alpha = 0.06f))
+        shape = RoundedCornerShape(14.dp),
+        color = if (isDarkMode) Color.Black.copy(alpha = 0.58f) else Color.White.copy(alpha = 0.78f),
+        border = BorderStroke(0.5.dp, if (isDarkMode) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.64f))
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(Icons.Default.PushPin, null, tint = Color(0xFF00A3FF), modifier = Modifier.size(14.dp))
             Spacer(Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(title, color = contentColor, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(text, color = contentColor.copy(alpha = 0.65f), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    title,
+                    color = contentColor,
+                    fontSize = 10.sp,
+                    lineHeight = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text,
+                    color = contentColor.copy(alpha = 0.65f),
+                    fontSize = 10.sp,
+                    lineHeight = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
             Icon(Icons.Default.ChevronRight, null, tint = contentColor.copy(alpha = 0.5f), modifier = Modifier.size(14.dp))
         }
@@ -1559,19 +1281,218 @@ private fun formatTimeLabel(value: String?): String? {
     }.getOrElse { value }
 }
 
+private fun directPresenceSubtitle(
+    isTyping: Boolean,
+    username: String,
+    presence: UserPresenceState?
+): String {
+    if (isTyping) return "typing..."
+    if (presence?.isOnline == true) return "Online"
+    val lastSeenAt = presence?.lastSeenAt ?: return "@$username"
+    val diff = (System.currentTimeMillis() - lastSeenAt).coerceAtLeast(0L)
+    return when {
+        diff < 120_000L -> "Last seen recently"
+        diff < 3_600_000L -> "Last seen ${maxOf(1, diff / 60_000L)} min ago"
+        diff < 86_400_000L -> "Last seen ${maxOf(1, diff / 3_600_000L)} h ago"
+        else -> "Last seen yesterday"
+    }
+}
+
 @Composable
-private fun ActionRow(label: String, icon: ImageVector, tint: Color, onClick: () -> Unit) {
+fun MessageContextPill(
+    text: String,
+    icon: ImageVector,
+    textColor: Color,
+    accentColor: Color,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .border(0.5.dp, textColor.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
+            .background(accentColor.copy(alpha = 0.10f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .width(2.dp)
+                .height(24.dp)
+                .background(accentColor.copy(alpha = 0.75f), RoundedCornerShape(999.dp))
+        )
+        Icon(icon, null, tint = textColor.copy(alpha = 0.58f), modifier = Modifier.size(12.dp))
+        Text(
+            text = text,
+            color = textColor.copy(alpha = 0.72f),
+            fontSize = 12.sp,
+            lineHeight = 15.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+fun MessageLifecycleStrip(
+    status: MessageStatus,
+    hasMedia: Boolean,
+    textColor: Color,
+    accentColor: Color
+) {
+    if (status != MessageStatus.SENDING || !hasMedia) return
+    Spacer(Modifier.height(6.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        LinearProgressIndicator(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(2.dp)
+                .clip(RoundedCornerShape(999.dp)),
+            color = if (status == MessageStatus.SENDING) accentColor.copy(alpha = 0.72f) else textColor.copy(alpha = 0.30f),
+            trackColor = textColor.copy(alpha = 0.10f)
+        )
+        Text(
+            text = "Uploading media...",
+            color = textColor.copy(alpha = 0.46f),
+            fontSize = 9.sp,
+            lineHeight = 10.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+fun JumpToLatestChip(
+    count: Int,
+    isDarkMode: Boolean,
+    onClick: () -> Unit
+) {
+    val surface = if (isDarkMode) Color(0xFF15171B).copy(alpha = 0.94f) else Color.White.copy(alpha = 0.94f)
+    val content = if (isDarkMode) Color.White else Color.Black
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(999.dp),
+        color = surface,
+        tonalElevation = 8.dp,
+        shadowElevation = 10.dp,
+        border = BorderStroke(0.5.dp, content.copy(alpha = 0.10f))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(PremiumBlue),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            Text(
+                text = if (count == 1) "New message" else "$count new messages",
+                color = content.copy(alpha = 0.86f),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+}
+
+@Composable
+fun MessageStatusFooter(
+    status: MessageStatus,
+    timeString: String,
+    isMe: Boolean,
+    textColor: Color,
+    accentColor: Color,
+    onRetry: () -> Unit,
+    isGroupMessage: Boolean
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(text = timeString, color = textColor.copy(alpha = 0.54f), fontSize = 10.sp)
+        if (!isMe) return@Row
+
+        AnimatedContent(
+            targetState = status,
+            transitionSpec = { fadeIn(tween(120)) togetherWith fadeOut(tween(90)) },
+            label = "message_status"
+        ) { currentStatus ->
+            when {
+                currentStatus == MessageStatus.QUEUED || currentStatus == MessageStatus.SENDING -> Icon(
+                    imageVector = Icons.Default.Schedule,
+                    contentDescription = null,
+                    tint = textColor.copy(alpha = 0.66f),
+                    modifier = Modifier.size(13.dp)
+                )
+                currentStatus == MessageStatus.SEEN -> Icon(
+                    imageVector = Icons.Default.DoneAll,
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(13.dp)
+                )
+                currentStatus == MessageStatus.DELIVERED -> Icon(
+                    imageVector = Icons.Default.Done,
+                    contentDescription = null,
+                    tint = textColor.copy(alpha = 0.62f),
+                    modifier = Modifier.size(13.dp)
+                )
+                currentStatus == MessageStatus.SENT -> Icon(
+                    imageVector = Icons.Default.Done,
+                    contentDescription = null,
+                    tint = textColor.copy(alpha = 0.56f),
+                    modifier = Modifier.size(13.dp)
+                )
+                currentStatus == MessageStatus.FAILED -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.ErrorOutline,
+                        contentDescription = null,
+                        tint = Color(0xFFFF6B6B),
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(Modifier.width(2.dp))
+                    Text(
+                        text = "Retry",
+                        color = Color(0xFFFF8A80),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clickable(onClick = onRetry)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActionRow(label: String, icon: ImageVector, tint: Color, compact: Boolean = false, onClick: () -> Unit) {
+    val rowShape = if (compact) 12.dp else 16.dp
+    val horizontalPadding = if (compact) 9.dp else 12.dp
+    val verticalPadding = if (compact) 7.dp else 10.dp
+    val iconSize = if (compact) 15.dp else 18.dp
+    val gap = if (compact) 7.dp else 10.dp
+    val fontSize = if (compact) 12.sp else 14.sp
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(rowShape))
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = horizontalPadding, vertical = verticalPadding),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(10.dp))
-        Text(label, color = tint, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        Icon(icon, null, tint = tint, modifier = Modifier.size(iconSize))
+        Spacer(Modifier.width(gap))
+        Text(label, color = tint, fontSize = fontSize, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -1599,13 +1520,28 @@ fun MessageActionsSheet(
     val contentColor = if (isDarkMode) Color.White else Color.Black
     val reactions = listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
     var expanded by remember { mutableStateOf(false) }
+    var panelVisible by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     if (anchorBounds == null) return
 
+    fun dismissWithAnimation() {
+        panelVisible = false
+        scope.launch {
+            delay(120)
+            onDismiss()
+        }
+    }
+
+    LaunchedEffect(anchorBounds) {
+        panelVisible = true
+    }
+
     val density = androidx.compose.ui.platform.LocalDensity.current
     val screenWidthPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
-    val panelWidthPx = with(density) { 300.dp.roundToPx() }
-    val panelHeightGuessPx = with(density) { (expanded).let { if (it) 340.dp else 260.dp }.roundToPx() }
+    val panelWidth = 230.dp
+    val panelWidthPx = with(density) { panelWidth.roundToPx() }
+    val panelHeightGuessPx = with(density) { (expanded).let { if (it) 258.dp else 194.dp }.roundToPx() }
     val anchorRight = anchorBounds.right.toInt()
     val anchorTop = anchorBounds.top.toInt()
     val anchorBottom = anchorBounds.bottom.toInt()
@@ -1617,24 +1553,33 @@ fun MessageActionsSheet(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onDismiss() }
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { dismissWithAnimation() }
     ) {
+        AnimatedVisibility(
+            visible = panelVisible,
+            enter = fadeIn(tween(90)) +
+                scaleIn(initialScale = 0.92f, animationSpec = tween(150, easing = FastOutSlowInEasing)) +
+                slideInVertically(tween(150, easing = FastOutSlowInEasing)) { it / 10 },
+            exit = fadeOut(tween(90)) +
+                scaleOut(targetScale = 0.96f, animationSpec = tween(100, easing = FastOutSlowInEasing)),
+            modifier = Modifier
+                .offset(x = with(density) { x.toDp() }, y = with(density) { y.toDp() })
+        ) {
             Surface(
                 modifier = Modifier
-                .offset(x = with(density) { x.toDp() }, y = with(density) { y.toDp() })
-                .width(300.dp)
+                .width(panelWidth)
                 .animateContentSize(animationSpec = tween(durationMillis = 150, easing = FastOutSlowInEasing)),
-            shape = RoundedCornerShape(24.dp),
+            shape = RoundedCornerShape(18.dp),
             color = if (isDarkMode) Color(0xFF1B1B1D) else Color.White,
             border = BorderStroke(0.7.dp, if (isDarkMode) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.06f))
         ) {
             Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                modifier = Modifier.padding(9.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     reactions.forEach { emoji ->
@@ -1652,14 +1597,14 @@ fun MessageActionsSheet(
                                 }
                                 .clickable {
                                     if (selected) onRemoveReaction() else onReactionSelected(emoji)
-                                    onDismiss()
+                                    dismissWithAnimation()
                                 }
                         ) {
                             Box(
-                                modifier = Modifier.padding(vertical = 9.dp),
+                                modifier = Modifier.padding(vertical = 6.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(text = emoji, fontSize = 18.sp)
+                                Text(text = emoji, fontSize = 15.sp)
                             }
                         }
                     }
@@ -1667,23 +1612,23 @@ fun MessageActionsSheet(
                         shape = CircleShape,
                         color = contentColor.copy(alpha = 0.07f),
                         border = BorderStroke(1.dp, contentColor.copy(alpha = 0.08f)),
-                        modifier = Modifier.size(40.dp).clickable { expanded = !expanded }
+                        modifier = Modifier.size(30.dp).clickable { expanded = !expanded }
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
                                 imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                                 contentDescription = null,
                                 tint = contentColor.copy(alpha = 0.72f),
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(15.dp)
                             )
                         }
                     }
                 }
 
                 AnimatedVisibility(visible = expanded, enter = fadeIn(tween(120)) + expandVertically(tween(120)), exit = fadeOut(tween(120)) + shrinkVertically(tween(120))) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         val extra = listOf("🔥", "👏", "😁", "😎", "💯", "🎉")
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.fillMaxWidth()) {
                             extra.forEach { emoji ->
                                 Surface(
                                     shape = CircleShape,
@@ -1691,11 +1636,11 @@ fun MessageActionsSheet(
                                     border = BorderStroke(1.dp, contentColor.copy(alpha = 0.08f)),
                                     modifier = Modifier.weight(1f).clickable {
                                         onReactionSelected(emoji)
-                                        onDismiss()
+                                        dismissWithAnimation()
                                     }
                                 ) {
-                                    Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
-                                        Text(text = emoji, fontSize = 17.sp)
+                                    Box(modifier = Modifier.padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
+                                        Text(text = emoji, fontSize = 14.sp)
                                     }
                                 }
                             }
@@ -1705,30 +1650,30 @@ fun MessageActionsSheet(
 
                 HorizontalDivider(color = contentColor.copy(alpha = 0.08f))
 
-                ActionRow("Reply", Icons.AutoMirrored.Filled.Reply, contentColor) {
+                ActionRow("Reply", Icons.AutoMirrored.Filled.Reply, contentColor, compact = true) {
                     onReply()
-                    onDismiss()
+                    dismissWithAnimation()
                 }
-                ActionRow("Copy", Icons.Default.ContentCopy, contentColor) {
+                ActionRow("Copy", Icons.Default.ContentCopy, contentColor, compact = true) {
                     onCopy()
-                    onDismiss()
+                    dismissWithAnimation()
                 }
                 if (canForward) {
-                    ActionRow("Forward", Icons.Default.Send, contentColor) {
+                    ActionRow("Forward", Icons.Default.Send, contentColor, compact = true) {
                         onForward()
-                        onDismiss()
+                        dismissWithAnimation()
                     }
                 }
                 if (canPin) {
-                    ActionRow(if (isPinned) "Unpin" else "Pin", Icons.Default.PushPin, contentColor) {
+                    ActionRow(if (isPinned) "Unpin" else "Pin", Icons.Default.PushPin, contentColor, compact = true) {
                         onPinToggle()
-                        onDismiss()
+                        dismissWithAnimation()
                     }
                 }
                 if (canEdit) {
-                    ActionRow("Edit", Icons.Default.Edit, contentColor) {
+                    ActionRow("Edit", Icons.Default.Edit, contentColor, compact = true) {
                         onEditMessage()
-                        onDismiss()
+                        dismissWithAnimation()
                     }
                 }
                 val readAtDisplay = formatTimeLabel(onReadAt)
@@ -1736,28 +1681,29 @@ fun MessageActionsSheet(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                            .clip(RoundedCornerShape(12.dp))
+                            .padding(horizontal = 9.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.Schedule, null, tint = contentColor.copy(alpha = 0.65f), modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Text("Read at $readAtDisplay", color = contentColor.copy(alpha = 0.72f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        Icon(Icons.Default.Schedule, null, tint = contentColor.copy(alpha = 0.65f), modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(7.dp))
+                        Text("Read at $readAtDisplay", color = contentColor.copy(alpha = 0.72f), fontSize = 11.sp, fontWeight = FontWeight.Medium)
                     }
                 }
                 if (currentReactionEmoji != null) {
-                    ActionRow("Remove reaction", Icons.Default.RemoveCircle, contentColor.copy(alpha = 0.9f)) {
+                    ActionRow("Remove reaction", Icons.Default.RemoveCircle, contentColor.copy(alpha = 0.9f), compact = true) {
                         onRemoveReaction()
-                        onDismiss()
+                        dismissWithAnimation()
                     }
                 }
                 if (isOwnMessage && onDeleteMessage != null) {
-                    ActionRow("Delete", Icons.Default.Delete, Color.Red.copy(alpha = 0.92f)) {
+                    ActionRow("Delete", Icons.Default.Delete, Color.Red.copy(alpha = 0.92f), compact = true) {
                         onDeleteMessage()
-                        onDismiss()
+                        dismissWithAnimation()
                     }
                 }
             }
+        }
         }
     }
 }
@@ -1776,29 +1722,79 @@ fun AttachmentMenu(contentColor: Color) {
     }
 }
 
-private fun MessageData.mergeFrom(other: MessageData): MessageData {
+private fun MessageData.mergeFrom(other: MessageData, incomingSource: MessageSource = MessageSource.SocketEvent): MessageData {
+    val result = ChatReducer.merge(
+        toReducerSnapshot(MessageSource.LocalCache),
+        other.toReducerSnapshot(incomingSource)
+    )
+    val reduced = result.message
     val otherText = other.text.takeIf { it.isNotBlank() }
     val otherReply = other.replyPreview?.takeIf { it.isNotBlank() }
+    val otherIsServer = other.backendId != null
     return copy(
-        text = otherText ?: text,
+        localId = reduced.localId,
+        backendId = reduced.backendId,
+        text = if (result.textFromIncoming) otherText ?: text else text,
         isMe = isMe || other.isMe,
         senderId = other.senderId ?: senderId,
-        timestamp = minOf(timestamp, other.timestamp).takeIf { it > 0 } ?: other.timestamp,
-        status = if (status == MessageStatus.READ || other.status == MessageStatus.READ) MessageStatus.READ else other.status,
+        timestamp = reduced.timestamp,
+        status = reduced.status.toUiStatus(),
+        errorReason = reduced.errorReason,
+        retryCount = reduced.retryCount,
         senderName = other.senderName ?: senderName,
         messageType = if (other.messageType.isNotBlank()) other.messageType else messageType,
         media = other.media ?: media,
-        replyPreview = otherReply ?: replyPreview,
-        reactions = if (other.reactions.isNotEmpty()) other.reactions else reactions,
-        forwardedFromMessageId = other.forwardedFromMessageId ?: forwardedFromMessageId,
-        forwardedFromSenderId = other.forwardedFromSenderId ?: forwardedFromSenderId,
-        forwardedFromConversationId = other.forwardedFromConversationId ?: forwardedFromConversationId,
-        forwardedAt = other.forwardedAt ?: forwardedAt,
+        pendingPayload = other.pendingPayload ?: pendingPayload,
+        replyPreview = if (result.textFromIncoming) otherReply ?: replyPreview else replyPreview,
+        reactions = if (result.reactionsFromIncoming) other.reactions else if (!otherIsServer && other.reactions.isNotEmpty()) other.reactions else reactions,
+        forwardedFromMessageId = if (otherIsServer) other.forwardedFromMessageId else other.forwardedFromMessageId ?: forwardedFromMessageId,
+        forwardedFromSenderId = if (otherIsServer) other.forwardedFromSenderId else other.forwardedFromSenderId ?: forwardedFromSenderId,
+        forwardedFromConversationId = if (otherIsServer) other.forwardedFromConversationId else other.forwardedFromConversationId ?: forwardedFromConversationId,
+        forwardedAt = if (otherIsServer) other.forwardedAt else other.forwardedAt ?: forwardedAt,
         readAt = other.readAt ?: readAt,
-        editedAt = other.editedAt ?: editedAt,
+        editedAt = if (result.editFromIncoming) other.editedAt ?: editedAt else editedAt,
         deletedGloballyAt = other.deletedGloballyAt ?: deletedGloballyAt
     )
 }
+
+fun messageStatusRank(status: MessageStatus): Int = when (status) {
+    else -> ChatReducer.statusRank(status.toReducerStatus())
+}
+
+fun MessageStatus.toReducerStatus(): ChatMessageStatus = when (this) {
+    MessageStatus.QUEUED -> ChatMessageStatus.QUEUED
+    MessageStatus.SENDING -> ChatMessageStatus.SENDING
+    MessageStatus.SENT -> ChatMessageStatus.SENT
+    MessageStatus.DELIVERED -> ChatMessageStatus.DELIVERED
+    MessageStatus.SEEN -> ChatMessageStatus.SEEN
+    MessageStatus.FAILED -> ChatMessageStatus.FAILED
+}
+
+fun ChatMessageStatus.toUiStatus(): MessageStatus = when (this) {
+    ChatMessageStatus.QUEUED -> MessageStatus.QUEUED
+    ChatMessageStatus.SENDING -> MessageStatus.SENDING
+    ChatMessageStatus.SENT -> MessageStatus.SENT
+    ChatMessageStatus.DELIVERED -> MessageStatus.DELIVERED
+    ChatMessageStatus.SEEN -> MessageStatus.SEEN
+    ChatMessageStatus.FAILED -> MessageStatus.FAILED
+}
+
+private fun MessageData.toReducerSnapshot(source: MessageSource): ChatMessageSnapshot =
+    ChatMessageSnapshot(
+        localId = localId,
+        clientId = localId,
+        backendId = backendId,
+        text = text,
+        status = status.toReducerStatus(),
+        source = source,
+        timestamp = timestamp,
+        editedAt = editedAt.toEpochMillisOrNull(),
+        deletedAt = deletedGloballyAt.toEpochMillisOrNull(),
+        reactions = reactions.map { "${it.userId.orEmpty()}:${it.emoji}" },
+        hasReactionSnapshot = backendId != null && source != MessageSource.LocalCache,
+        errorReason = errorReason,
+        retryCount = retryCount
+    )
 
 private fun retrofit2.Response<*>?.apiErrorMessage(defaultMessage: String): String {
     val response = this ?: return defaultMessage
@@ -1809,6 +1805,35 @@ private fun retrofit2.Response<*>?.apiErrorMessage(defaultMessage: String): Stri
         return body.trim().takeIf { it.isNotBlank() } ?: response.message().ifBlank { defaultMessage }
     }
     return response.message().ifBlank { defaultMessage }
+}
+
+fun retrofit2.Response<*>?.shouldQueueForRetry(): Boolean {
+    val response = this ?: return true
+    return response.code() == 408 || response.code() == 429 || response.code() in 500..599
+}
+
+fun Throwable?.chatSendErrorCategory(): String {
+    val error = this ?: return "no_http_response"
+    val name = error::class.java.simpleName
+    return when {
+        name.contains("Timeout", ignoreCase = true) -> "timeout"
+        name.contains("UnknownHost", ignoreCase = true) -> "dns_or_offline"
+        name.contains("Connect", ignoreCase = true) -> "connect_failed"
+        name.contains("SSL", ignoreCase = true) -> "ssl"
+        name.contains("Socket", ignoreCase = true) -> "socket_io"
+        else -> name.ifBlank { "network_exception" }
+    }
+}
+
+fun Throwable?.chatSendErrorMessage(): String {
+    val category = chatSendErrorCategory()
+    return when (category) {
+        "timeout" -> "Network timeout. Queued for retry."
+        "dns_or_offline" -> "No internet connection. Queued for retry."
+        "connect_failed" -> "Could not reach server. Queued for retry."
+        "ssl" -> "Secure connection failed. Queued for retry."
+        else -> "Waiting for connection. Queued for retry."
+    }
 }
 
 @Composable
@@ -1847,6 +1872,8 @@ fun HeaderCenterCapsule(
     username: String,
     isTyping: Boolean,
     isRequest: Boolean,
+    presenceSubtitle: String,
+    isOnline: Boolean,
     isDarkMode: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -1877,13 +1904,13 @@ fun HeaderCenterCapsule(
             )
             if (!isRequest) {
                 AnimatedContent(
-                    targetState = isTyping,
+                    targetState = presenceSubtitle,
                     transitionSpec = { fadeIn() togetherWith fadeOut() },
                     label = "status"
-                ) { typing ->
+                ) { subtitle ->
                     Text(
-                        text = if (typing) "typing..." else "@$username",
-                        color = Color(0xFF007AFF),
+                        text = subtitle,
+                        color = if (isTyping || isOnline) Color(0xFF00C853) else Color(0xFF007AFF),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -1898,6 +1925,7 @@ fun HeaderAvatarButton(
     profile: ProfileModel?,
     isDarkMode: Boolean,
     contentColor: Color,
+    isOnline: Boolean = false,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1916,6 +1944,17 @@ fun HeaderAvatarButton(
             isDarkMode = isDarkMode,
             fontSize = 14.sp
         )
+        if (isOnline) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(2.dp)
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF00C853))
+                    .border(1.5.dp, if (isDarkMode) Color(0xFF101214) else Color.White, CircleShape)
+            )
+        }
     }
 }
 
@@ -1935,13 +1974,25 @@ fun TelegramIosGlass(
         label = "glassScale"
     )
 
-    val backgroundBrush = if (isDarkMode) {
-        Color.White.copy(0.12f)
+    val glassBrush = if (isDarkMode) {
+        Brush.verticalGradient(
+            listOf(
+                Color.Black.copy(alpha = 0.72f),
+                Color.Black.copy(alpha = 0.54f),
+                Color.White.copy(alpha = 0.08f)
+            )
+        )
     } else {
-        Color.Black.copy(0.06f)
+        Brush.verticalGradient(
+            listOf(
+                Color.White.copy(alpha = 0.82f),
+                Color.White.copy(alpha = 0.64f),
+                Color.Black.copy(alpha = 0.05f)
+            )
+        )
     }
-    
-    val borderColor = if (isDarkMode) Color.White.copy(0.15f) else Color.Black.copy(0.1f)
+
+    val borderColor = if (isDarkMode) Color.White.copy(0.18f) else Color.White.copy(0.62f)
 
     Box(
         modifier = modifier
@@ -1950,7 +2001,7 @@ fun TelegramIosGlass(
                 scaleY = scale
             }
             .clip(shape)
-            .background(backgroundBrush)
+            .background(glassBrush)
             .border(0.5.dp, borderColor, shape)
             .pointerInput(onClick) {
                 detectTapGestures(
@@ -2298,7 +2349,66 @@ private fun isSameDay(t1: Long, t2: Long): Boolean {
     return f.format(Date(t1)) == f.format(Date(t2))
 }
 
-enum class MessageStatus { SENT, READ }
+enum class MessageStatus { QUEUED, SENDING, SENT, DELIVERED, SEEN, FAILED }
+
+data class PendingMessagePayload(
+    val text: String? = null,
+    val replyToMessageId: String? = null,
+    val mediaUri: String? = null,
+    val mimeType: String? = null,
+    val messageTypeOverride: String? = null
+)
+
+fun PendingMessagePayload.toOutboxPayload(): PendingChatPayload =
+    PendingChatPayload(
+        text = text,
+        replyToMessageId = replyToMessageId,
+        mediaUri = mediaUri,
+        mimeType = mimeType,
+        messageTypeOverride = messageTypeOverride
+    )
+
+fun PendingChatPayload.toPendingMessagePayload(): PendingMessagePayload =
+    PendingMessagePayload(
+        text = text,
+        replyToMessageId = replyToMessageId,
+        mediaUri = mediaUri,
+        mimeType = mimeType,
+        messageTypeOverride = messageTypeOverride
+    )
+
+private fun PendingChatEnvelope.toDirectUiMessage(currentUser: ProfileModel?): MessageData {
+    val pending = payload.toPendingMessagePayload()
+    val mediaType = payload.messageTypeOverride ?: when {
+        payload.mimeType?.startsWith("video") == true -> "video"
+        payload.mimeType?.startsWith("audio") == true -> "voice"
+        payload.mediaUri != null -> "image"
+        else -> "text"
+    }
+    return MessageData(
+        id = localId.hashCode(),
+        localId = localId,
+        backendId = null,
+        text = payload.text.orEmpty(),
+        isMe = true,
+        senderId = currentUser?.id,
+        timestamp = createdAt,
+        status = if (terminalError.isNullOrBlank()) MessageStatus.QUEUED else MessageStatus.FAILED,
+        errorReason = terminalError,
+        retryCount = retryCount,
+        senderName = currentUser?.fullName ?: currentUser?.username,
+        messageType = mediaType,
+        media = payload.mediaUri?.let {
+            ChatMediaUi(
+                url = it,
+                type = mediaType,
+                fileName = if (mediaType == "video") "Video" else if (mediaType == "voice") "Voice message" else "Photo",
+                mimeType = payload.mimeType
+            )
+        },
+        pendingPayload = pending
+    )
+}
 
 data class MessageReactionUi(
     val userId: String?,
@@ -2310,6 +2420,7 @@ data class MessageReactionUi(
 
 data class MessageData(
     val id: Int,
+    val localId: String? = null,
     val backendId: String? = null,
     val text: String,
     val isMe: Boolean,
@@ -2317,9 +2428,12 @@ data class MessageData(
     var isNew: Boolean = false,
     val timestamp: Long = System.currentTimeMillis(),
     val status: MessageStatus = MessageStatus.SENT,
+    val errorReason: String? = null,
+    val retryCount: Int = 0,
     val senderName: String? = null,
     val messageType: String = "text",
     val media: ChatMediaUi? = null,
+    val pendingPayload: PendingMessagePayload? = null,
     val replyPreview: String? = null,
     val reactions: List<MessageReactionUi> = emptyList(),
     val forwardedFromMessageId: String? = null,
@@ -2349,7 +2463,11 @@ fun ChatEmptyState(title: String, subtitle: String, isDarkMode: Boolean) {
 private fun ChatMessageModel.toUiMessage(currentUserId: String?): MessageData {
     val senderId = sender?.id
     val isMine = currentUserId != null && senderId == currentUserId
-    val seen = currentUserId != null && seenBy.any { it == currentUserId }
+    val seen = if (isMine) {
+        readAt != null || seenBy.any { it != currentUserId }
+    } else {
+        currentUserId != null && seenBy.any { it == currentUserId }
+    }
     val replyPreviewText = replyToMessage?.text
         ?: if (replyToMessage?.media != null) {
             when (replyToMessage.messageType) {
@@ -2363,12 +2481,17 @@ private fun ChatMessageModel.toUiMessage(currentUserId: String?): MessageData {
     val messageTextValue = text?.takeIf { it.isNotBlank() } ?: ""
     return MessageData(
         id = id.hashCode(),
+        localId = clientId,
         backendId = id,
         text = messageTextValue,
         isMe = isMine,
         senderId = senderId,
         timestamp = createdAt.toEpochMillis(),
-        status = if (seen) MessageStatus.READ else MessageStatus.SENT,
+        status = when {
+            seen -> MessageStatus.SEEN
+            deliveredAt != null -> MessageStatus.DELIVERED
+            else -> MessageStatus.SENT
+        },
         senderName = sender?.fullName ?: sender?.username,
         messageType = messageType,
         media = media?.let {
@@ -2404,4 +2527,9 @@ private fun ChatMessageModel.toUiMessage(currentUserId: String?): MessageData {
 private fun String?.toEpochMillis(): Long {
     if (this.isNullOrBlank()) return System.currentTimeMillis()
     return runCatching { java.time.Instant.parse(this).toEpochMilli() }.getOrElse { System.currentTimeMillis() }
+}
+
+fun String?.toEpochMillisOrNull(): Long? {
+    if (isNullOrBlank()) return null
+    return runCatching { java.time.Instant.parse(this).toEpochMilli() }.getOrNull()
 }

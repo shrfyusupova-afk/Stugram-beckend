@@ -2,6 +2,7 @@ package com.stugram.app.ui.home
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.media.MediaRecorder
@@ -9,6 +10,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.widget.VideoView
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -52,6 +54,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -122,6 +125,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
@@ -218,6 +222,7 @@ fun RichChatComposer(
     var showAttachmentSheet by remember { mutableStateOf(false) }
     var pendingAttachment by remember { mutableStateOf<PendingAttachment?>(null) }
     var isSendingAttachment by remember { mutableStateOf(false) }
+    var isSendTapLocked by remember { mutableStateOf(false) }
     var inlineMessage by remember { mutableStateOf<String?>(null) }
     var recordingKind by remember { mutableStateOf<ComposerRecordingKind?>(null) }
     var recordingPhase by remember { mutableStateOf<ComposerRecordingPhase?>(null) }
@@ -422,6 +427,7 @@ fun RichChatComposer(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
+            context.persistReadPermission(uri)
             val mimeType = context.contentResolver.getType(uri) ?: "image/*"
             pendingAttachment = PendingAttachment(
                 previewTitle = if (mimeType.startsWith("video")) "Video ready to send" else "Photo ready to send",
@@ -439,6 +445,7 @@ fun RichChatComposer(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
+            context.persistReadPermission(uri)
             val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
             pendingAttachment = PendingAttachment(
                 kind = ChatStructuredType.FILE,
@@ -693,7 +700,7 @@ fun RichChatComposer(
 
         Row(
             modifier = Modifier
-                .padding(horizontal = 12.dp, vertical = 10.dp)
+                .padding(horizontal = 12.dp, vertical = 6.dp)
                 .fillMaxWidth(),
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -819,11 +826,16 @@ fun RichChatComposer(
                         onClick = {
                             if (pendingAttachment != null) {
                                 scope.launch { sendPendingAttachment() }
-                            } else {
+                            } else if (!isSendTapLocked) {
+                                isSendTapLocked = true
                                 onSendText()
+                                scope.launch {
+                                    delay(450)
+                                    isSendTapLocked = false
+                                }
                             }
                         },
-                        enabled = sendEnabled && !isSendingAttachment,
+                        enabled = sendEnabled && !isSendingAttachment && !isSendTapLocked,
                         modifier = Modifier
                             .size(48.dp)
                             .clip(CircleShape)
@@ -1639,12 +1651,20 @@ fun ChatMessageContent(
     media: ChatMediaUi?,
     isDarkMode: Boolean,
     preferLightContent: Boolean = false,
+    onOpenStructured: (ChatStructuredPayload) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val structured = parseStructuredPayload(text)
     val contentColor = if (preferLightContent || isDarkMode) Color.White else Color.Black
+    var previewMedia by remember(media?.url) { mutableStateOf<ChatMediaUi?>(null) }
     when {
-        structured != null -> StructuredMessageCard(payload = structured, isDarkMode = isDarkMode, preferLightContent = preferLightContent, modifier = modifier)
+        structured != null -> StructuredMessageCard(
+            payload = structured,
+            isDarkMode = isDarkMode,
+            preferLightContent = preferLightContent,
+            onClick = { onOpenStructured(structured) },
+            modifier = modifier
+        )
         media != null && messageType == "voice" -> {
             Column(modifier = modifier.widthIn(max = 250.dp)) {
                 VoiceMessageCard(
@@ -1705,6 +1725,7 @@ fun ChatMessageContent(
                         .fillMaxWidth()
                         .height(if (messageType == "video") 200.dp else 180.dp)
                         .clip(RoundedCornerShape(18.dp))
+                        .clickable { previewMedia = media }
                 ) {
                     AsyncImage(
                         model = media.url,
@@ -1766,6 +1787,14 @@ fun ChatMessageContent(
             )
         }
     }
+
+    previewMedia?.let { activeMedia ->
+        ChatMediaPreviewDialog(
+            media = activeMedia,
+            isVideo = messageType == "video" || activeMedia.type == "video",
+            onDismiss = { previewMedia = null }
+        )
+    }
 }
 
 @Composable
@@ -1773,6 +1802,7 @@ private fun StructuredMessageCard(
     payload: ChatStructuredPayload,
     isDarkMode: Boolean,
     preferLightContent: Boolean = false,
+    onClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val contentColor = if (preferLightContent || isDarkMode) Color.White else Color.Black
@@ -1784,10 +1814,11 @@ private fun StructuredMessageCard(
         ChatStructuredType.LOCATION -> if (isDarkMode) Color(0xFF143228) else Color(0xFFEAF8F0)
     }
     Surface(
-        modifier = modifier.widthIn(max = 250.dp),
+        modifier = modifier
+            .widthIn(max = 250.dp)
+            .clickable(onClick = onClick),
         shape = RoundedCornerShape(18.dp),
-        color = cardBg,
-        border = BorderStroke(0.5.dp, contentColor.copy(alpha = 0.10f))
+        color = cardBg
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
             if (!payload.imageUrl.isNullOrBlank()) {
@@ -1857,6 +1888,57 @@ private fun StructuredMessageCard(
     }
 }
 
+@Composable
+private fun ChatMediaPreviewDialog(
+    media: ChatMediaUi,
+    isVideo: Boolean,
+    onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            if (isVideo) {
+                AndroidView(
+                    factory = {
+                        VideoView(it).apply {
+                            setVideoURI(Uri.parse(media.url))
+                            setOnPreparedListener { player ->
+                                player.isLooping = false
+                                start()
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                AsyncImage(
+                    model = media.url,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                )
+            }
+
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(24.dp)
+                    .background(Color.Black.copy(alpha = 0.45f), CircleShape)
+            ) {
+                Icon(Icons.Default.Close, null, tint = Color.White)
+            }
+        }
+    }
+}
+
 private fun Context.resolveDisplayName(uri: Uri): String {
     val cursor = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
     cursor?.use {
@@ -1880,6 +1962,11 @@ private fun Context.resolveFileSize(uri: Uri): String {
 
 private fun buildLocationAttachment(context: Context): PendingAttachment? {
     val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
+    val hasLocationPermission =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    if (!hasLocationPermission) return null
+
     val lastKnown = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
         .mapNotNull { provider -> runCatching { manager.getLastKnownLocation(provider) }.getOrNull() }
         .firstOrNull()
@@ -1923,6 +2010,12 @@ private fun formatSeconds(seconds: Int): String {
 
 private fun Context.createChatCacheFile(prefix: String, extension: String): File {
     return File(cacheDir, prefix + System.currentTimeMillis() + extension)
+}
+
+private fun Context.persistReadPermission(uri: Uri) {
+    runCatching {
+        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
 }
 
 private suspend fun Context.awaitCameraProvider(): ProcessCameraProvider =

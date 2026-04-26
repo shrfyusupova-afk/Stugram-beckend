@@ -10,9 +10,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.stugram.app.core.storage.TokenManager
 import com.stugram.app.data.repository.PostRepository
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -25,6 +27,9 @@ fun PostDetailScreen(
     onNavigateToProfile: (String) -> Unit = {}
 ) {
     val viewModel: HomeViewModel = viewModel()
+    val context = LocalContext.current
+    val tokenManager = remember(context) { TokenManager(context.applicationContext) }
+    val currentUser by tokenManager.currentUser.collectAsState(initial = null)
     val postRepository = remember { PostRepository() }
     var post by remember { mutableStateOf<PostData?>(null) }
     var isLoading by remember { mutableStateOf(true) }
@@ -40,19 +45,24 @@ fun PostDetailScreen(
             if (response.isSuccessful) {
                 val model = response.body()?.data
                 if (model != null) {
+                    val firstMedia = model.media.firstOrNull()
                     post = PostData(
                         id = model.id.hashCode(),
                         backendId = model.id,
+                        authorId = model.author.id,
                         user = model.author.username,
                         authorFullName = model.author.fullName,
-                        image = model.media.firstOrNull()?.url,
+                        image = firstMedia?.url,
+                        thumbnailUrl = firstMedia?.thumbnailUrl,
                         userAvatar = model.author.avatar,
                         caption = model.caption,
                         likes = model.likesCount,
                         comments = model.commentsCount,
                         isLiked = model.viewerHasLiked ?: false,
                         isSaved = model.viewerHasSaved ?: false,
-                        isVideo = model.media.firstOrNull()?.type == "video",
+                        isVideo = firstMedia?.type == "video",
+                        mediaAspectRatio = mediaAspectRatioFromDimensions(firstMedia?.width, firstMedia?.height),
+                        authorFollowStatus = model.author.followStatus,
                         createdAt = model.createdAt
                     )
                 }
@@ -99,6 +109,7 @@ fun PostDetailScreen(
                                 isDarkMode = isDarkMode,
                                 onCommentsClick = { selectedCommentsPost = it },
                                 onProfileClick = onNavigateToProfile,
+                                currentUserId = currentUser?.id,
                                 onToggleLike = { viewModel.toggleLike(it) },
                                 onToggleSave = { viewModel.toggleSave(it) }
                             )

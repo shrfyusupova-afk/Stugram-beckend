@@ -29,6 +29,7 @@ fun ChangePasswordScreen(isDarkMode: Boolean, accentBlue: Color, viewModel: Sett
     var confirmPass by remember { mutableStateOf("") }
 
     var showForgotDialog by remember { mutableStateOf(false) }
+    var forgotMessage by remember { mutableStateOf("Sending reset instructions...") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(false) }
 
@@ -59,7 +60,20 @@ fun ChangePasswordScreen(isDarkMode: Boolean, accentBlue: Color, viewModel: Sett
                 shape = RoundedCornerShape(12.dp)
             )
             
-            TextButton(onClick = { showForgotDialog = true }, modifier = Modifier.align(Alignment.End)) {
+            TextButton(
+                onClick = {
+                    showForgotDialog = true
+                    forgotMessage = "Sending reset instructions..."
+                    viewModel.forgotPassword { success, message ->
+                        forgotMessage = if (success) {
+                            message ?: "Password reset instructions were sent if this account supports password reset."
+                        } else {
+                            message ?: "Could not start password reset."
+                        }
+                    }
+                },
+                modifier = Modifier.align(Alignment.End)
+            ) {
                 Text("Forgot password?", color = accentBlue, fontSize = 13.sp)
             }
             
@@ -122,7 +136,7 @@ fun ChangePasswordScreen(isDarkMode: Boolean, accentBlue: Color, viewModel: Sett
             onDismissRequest = { showForgotDialog = false },
             confirmButton = { TextButton(onClick = { showForgotDialog = false }) { Text("OK") } },
             title = { Text("Reset Password") },
-            text = { Text("A password reset link has been sent to your email.") }
+            text = { Text(forgotMessage) }
         )
     }
 }

@@ -21,10 +21,12 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.snapshotFlow
+import com.stugram.app.core.notification.ForegroundChatRegistry
 import com.stugram.app.core.socket.ChatSocketManager
 import com.stugram.app.core.storage.TokenManager
 import com.stugram.app.BuildConfig
 import com.stugram.app.data.repository.DeviceRepository
+import com.stugram.app.data.repository.MessagesInboxCache
 import com.stugram.app.data.remote.model.RegisterPushTokenRequest
 import com.google.firebase.messaging.FirebaseMessaging
 import android.provider.Settings
@@ -50,6 +52,7 @@ fun HomeScreen(
     val accentBlue = Color(0xFF00A3FF)
     val contentColor = if (isDarkMode) Color.White else Color.Black
     val tokenManager = remember { TokenManager(context.applicationContext) }
+    val chatSocketManager = remember { ChatSocketManager.getInstance(tokenManager) }
     val currentUser by tokenManager.currentUser.collectAsState(initial = null)
     val sessions by tokenManager.sessions.collectAsState(initial = emptyList())
 
@@ -57,10 +60,13 @@ fun HomeScreen(
     var selectedCommentsPost by remember { mutableStateOf<PostData?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val profileSwitchingEnabled = false
     var showProfileSwitcher by remember { mutableStateOf(false) }
     var showAddAccountAuth by remember { mutableStateOf(false) }
     var isSessionTransitioning by remember { mutableStateOf(false) }
     var lastHandledUserId by remember { mutableStateOf<String?>(null) }
+    var lastRealtimeUserId by remember { mutableStateOf<String?>(null) }
+    var lastPushRegistrationKey by remember { mutableStateOf<String?>(null) }
     var reelsViewerSeed by remember { mutableStateOf<PostData?>(null) }
     var reelsViewerVisible by remember { mutableStateOf(false) }
 
@@ -77,7 +83,12 @@ fun HomeScreen(
         viewModel.syncCurrentUserSnapshot(currentUser)
     }
 
-    fun refreshRealtimeAndPushIdentity() {
+    fun refreshRealtimeAndPushIdentity(userId: String) {
+        if (lastRealtimeUserId != userId) {
+            lastRealtimeUserId = userId
+        } else {
+            return
+        }
         val socket = ChatSocketManager.getInstance(tokenManager)
         socket.disconnect()
         socket.connect()
@@ -89,6 +100,9 @@ fun HomeScreen(
         FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
             if (!task.isSuccessful) return@addOnCompleteListener
             val token = task.result ?: return@addOnCompleteListener
+            val registrationKey = "$userId:$token"
+            if (lastPushRegistrationKey == registrationKey) return@addOnCompleteListener
+            lastPushRegistrationKey = registrationKey
             scope.launch {
                 runCatching {
                     deviceRepository.registerPushToken(
@@ -103,9 +117,10 @@ fun HomeScreen(
         }
     }
 
-    LaunchedEffect(currentUser?.id, sessions.size) {
+    LaunchedEffect(currentUser?.id) {
         val user = currentUser
         if (user == null) {
+            MessagesInboxCache.reset()
             if (sessions.isEmpty() && lastHandledUserId != null) {
                 onNavigateToAuth()
             }
@@ -114,14 +129,11 @@ fun HomeScreen(
 
         if (lastHandledUserId == null) {
             lastHandledUserId = user.id
-            refreshRealtimeAndPushIdentity()
+            refreshRealtimeAndPushIdentity(user.id)
             return@LaunchedEffect
         }
 
-        if (lastHandledUserId == user.id) {
-            refreshRealtimeAndPushIdentity()
-            return@LaunchedEffect
-        }
+        if (lastHandledUserId == user.id) return@LaunchedEffect
 
         isSessionTransitioning = true
         lastHandledUserId = user.id
@@ -130,13 +142,78 @@ fun HomeScreen(
         viewModel.toggleCamera(false)
         viewModel.toggleNotifications(false)
         viewModel.onTabSelected(viewModel.currentTab)
-        viewModel.refreshAll()
-        viewModel.refreshReels()
-        viewModel.refreshMessages()
-        viewModel.refreshUnreadNotifications()
-        viewModel.refreshProfile(user.username)
-        refreshRealtimeAndPushIdentity()
+        viewModel.refreshForUserSwitch(user)
+        viewModel.refreshUnreadMessagesSummary(force = true)
+        refreshRealtimeAndPushIdentity(user.id)
         isSessionTransitioning = false
+    }
+
+    LaunchedEffect(currentUser?.id) {
+        val activeUserId = currentUser?.id ?: return@LaunchedEffect
+
+        launch {
+            chatSocketManager.connectionEvents.collect { event ->
+                if (event is com.stugram.app.core.socket.SocketConnectionEvent.Reconnected) {
+                    viewModel.refreshUnreadMessagesSummary(force = true)
+                }
+            }
+        }
+
+        launch {
+            chatSocketManager.newMessages.collect { message ->
+                if (message.sender?.id == activeUserId) return@collect
+                val conversationId = message.conversation ?: return@collect
+                if (ForegroundChatRegistry.activeConversationId == conversationId) return@collect
+                MessagesInboxCache.incrementChatUnread(
+                    conversationId = conversationId,
+                    name = message.sender?.fullName?.takeIf { it.isNotBlank() } ?: message.sender?.username ?: "New message",
+                    username = message.sender?.username,
+                    avatar = message.sender?.avatar,
+                    preview = message.text ?: when (message.messageType) {
+                        "image" -> "Photo"
+                        "video" -> "Video"
+                        "voice" -> "Voice message"
+                        else -> "New message"
+                    },
+                    time = "Now"
+                )
+            }
+        }
+
+        launch {
+            chatSocketManager.groupMessages.collect { (groupId, message) ->
+                if (message.sender?.id == activeUserId) return@collect
+                if (ForegroundChatRegistry.activeGroupId == groupId) return@collect
+                MessagesInboxCache.incrementGroupUnread(
+                    groupId = groupId,
+                    preview = message.text ?: when (message.messageType) {
+                        "image" -> "Photo"
+                        "video" -> "Video"
+                        "voice" -> "Voice message"
+                        else -> "New message"
+                    },
+                    time = "Now"
+                )
+            }
+        }
+
+        launch {
+            chatSocketManager.messageSeenEvents.collect { event ->
+                val cleared = event.conversationId?.let { MessagesInboxCache.clearChatUnread(it) } == true
+                if (!cleared) {
+                    viewModel.refreshUnreadMessagesSummary(force = true)
+                }
+            }
+        }
+
+        launch {
+            chatSocketManager.groupMessageSeenEvents.collect { event ->
+                val cleared = event.groupId?.let { MessagesInboxCache.clearGroupUnread(it) } == true
+                if (!cleared) {
+                    viewModel.refreshUnreadMessagesSummary(force = true)
+                }
+            }
+        }
     }
 
     // Feed pagination trigger: load next page when near end.
@@ -195,8 +272,11 @@ fun HomeScreen(
                                     viewModel.onTabSelected(it) 
                                 }
                             },
-                            onProfileLongPress = { showProfileSwitcher = true },
+                            onProfileLongPress = {
+                                if (profileSwitchingEnabled) showProfileSwitcher = true
+                            },
                             isDarkMode = if (viewModel.currentTab == 2) true else isDarkMode,
+                            unreadMessagesCount = viewModel.unreadMessagesCount,
                             modifier = if (viewModel.currentTab == 2) Modifier.graphicsLayer(alpha = 0.8f) else Modifier
                         )
                     }
@@ -243,10 +323,15 @@ fun HomeScreen(
                                 reelsViewerSeed = it
                                 reelsViewerVisible = true
                             },
+                            onToggleAuthorFollow = { post, isFollowing, onResult ->
+                                val userId = post.authorId
+                                if (userId.isNullOrBlank()) return@HomeTabScreen
+                                viewModel.toggleFollowByUserId(userId, post.user, isFollowing, onResult)
+                            },
                             onToggleLike = { viewModel.toggleLike(it) },
                             onToggleSave = { viewModel.toggleSave(it) },
                             isRefreshing = viewModel.isHomeRefreshing,
-                            onRefresh = { viewModel.refreshHome() },
+                            onRefresh = { viewModel.refreshForPullToRefresh() },
                             listState = listState,
                             isLoadingMore = viewModel.isHomeLoadingMore,
                             onLoadMore = { viewModel.loadNextFeedPage() },
@@ -277,6 +362,7 @@ fun HomeScreen(
                                 // follow consistency flow that emits events on success.
                                 viewModel.toggleFollowByUserId(userId, post.user, isFollowing, onResult)
                             },
+                            currentUserId = currentUser?.id,
                             onCommentAdded = { viewModel.handleCommentAdded(it) },
                             onProfileClick = { username -> viewModel.onTabSelected(4, profileUsername = username) }
                         )
@@ -285,6 +371,9 @@ fun HomeScreen(
                             onBack = { viewModel.onTabSelected(0) }, 
                             onNavigateToChat = onNavigateToChat, 
                             onNavigateToGroupChat = onNavigateToGroupChat,
+                            onNavigateToProfile = { username ->
+                                viewModel.onTabSelected(4, profileUsername = username)
+                            },
                             onNavigateToPost = onNavigateToPost,
                             isRefreshing = viewModel.isMessagesRefreshing,
                             onRefresh = { viewModel.refreshMessages() }
@@ -292,7 +381,12 @@ fun HomeScreen(
                         4 -> ProfileScreen(
                             isDarkMode = isDarkMode,
                             isRefreshing = viewModel.isProfileRefreshing,
-                            onRefresh = { viewModel.refreshProfile() },
+                            onRefresh = {
+                                viewModel.refreshProfile(
+                                    username = viewModel.selectedProfileUsername,
+                                    force = true
+                                )
+                            },
                             onThemeChange = onThemeChange,
                             isMyProfile = viewModel.selectedProfileId == null && viewModel.selectedProfileUsername == null,
                             profileId = viewModel.selectedProfileId,
@@ -342,6 +436,7 @@ fun HomeScreen(
                         if (userId.isNullOrBlank()) return@ReelsScreen
                         viewModel.toggleFollowByUserId(userId, post.user, isFollowing, onResult)
                     },
+                    currentUserId = currentUser?.id,
                     onCommentAdded = { viewModel.handleCommentAdded(it) },
                     onProfileClick = { username -> viewModel.onTabSelected(4, profileUsername = username) },
                     initialPage = initialPage,
@@ -360,22 +455,15 @@ fun HomeScreen(
             CameraScreen(
                 onDismiss = { viewModel.toggleCamera(false) },
                 accentBlue = accentBlue,
-                onPostCreated = {
-                    viewModel.refreshHome()
-                    viewModel.refreshReels()
-                    viewModel.refreshProfile(viewModel.selectedProfileUsername)
-                    viewModel.refreshProfile(viewModel.currentUserProfile?.username)
-                },
-                onStoryCreated = {
-                    viewModel.refreshStories()
-                    viewModel.refreshHome()
-                },
-                onReelCreated = {
-                    viewModel.refreshHome()
-                    viewModel.refreshReels()
-                    viewModel.refreshProfile(viewModel.selectedProfileUsername)
-                    viewModel.refreshProfile(viewModel.currentUserProfile?.username)
-                }
+	                onPostCreated = {
+	                    viewModel.refreshAfterContentCreation("post")
+	                },
+	                onStoryCreated = {
+	                    viewModel.refreshAfterContentCreation("story")
+	                },
+	                onReelCreated = {
+	                    viewModel.refreshAfterContentCreation("reel")
+	                }
             )
         }
 
@@ -429,7 +517,7 @@ fun HomeScreen(
             )
         }
 
-        if (showProfileSwitcher) {
+        if (profileSwitchingEnabled && showProfileSwitcher) {
             ProfileSwitcherModal(
                 isDarkMode = isDarkMode,
                 onDismiss = { showProfileSwitcher = false },
@@ -443,7 +531,7 @@ fun HomeScreen(
             )
         }
 
-        if (showAddAccountAuth) {
+        if (profileSwitchingEnabled && showAddAccountAuth) {
             AddAccountAuthDialog(
                 isDarkMode = isDarkMode,
                 onDismiss = { showAddAccountAuth = false },

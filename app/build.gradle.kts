@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    id("org.jetbrains.kotlin.kapt")
     alias(libs.plugins.google.services)
 }
 
@@ -9,14 +10,7 @@ android {
     namespace = "com.stugram.app"
     compileSdk = 35
 
-    fun resolveApiBaseUrl(defaultUrl: String): String {
-        val override = listOfNotNull(
-            providers.gradleProperty("stugramApiBaseUrl").orNull?.trim(),
-            providers.environmentVariable("STUGRAM_API_BASE_URL").orNull?.trim()
-        ).firstOrNull { it.isNotBlank() }
-
-        return override ?: defaultUrl
-    }
+    val productionApiBaseUrl = "https://stugram-beckend.onrender.com/api/v1/"
 
     defaultConfig {
         applicationId = "com.stugram.app"
@@ -26,6 +20,7 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "API_BASE_URL", "\"$productionApiBaseUrl\"")
 
         ndk {
             abiFilters += setOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
@@ -40,11 +35,9 @@ android {
 
     buildTypes {
         debug {
-            buildConfigField("String", "API_BASE_URL", "\"${resolveApiBaseUrl("http://127.0.0.1:5001/api/v1/")}\"")
         }
         release {
             isMinifyEnabled = false
-            buildConfigField("String", "API_BASE_URL", "\"${resolveApiBaseUrl("https://api.stugram.invalid/api/v1/")}\"")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -79,6 +72,7 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.datastore.preferences)
+    implementation(libs.androidx.security.crypto)
     implementation(libs.androidx.credentials)
     implementation(libs.androidx.credentials.play.services.auth)
     implementation(libs.googleid)
@@ -88,6 +82,8 @@ dependencies {
     implementation(libs.okhttp.logging)
     implementation(libs.coil.compose)
     implementation(libs.socket.io.client)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
     implementation("androidx.camera:camera-core:1.4.1")
     implementation("androidx.camera:camera-camera2:1.4.1")
     implementation("androidx.camera:camera-lifecycle:1.4.1")
@@ -100,12 +96,15 @@ dependencies {
 
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging.ktx)
-    
+
     testImplementation(libs.junit)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.robolectric)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+    kapt(libs.androidx.room.compiler)
 }

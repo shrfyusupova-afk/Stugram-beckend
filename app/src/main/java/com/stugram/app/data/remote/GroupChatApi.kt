@@ -3,6 +3,7 @@ package com.stugram.app.data.remote
 import com.stugram.app.data.remote.model.GroupConversationModel
 import com.stugram.app.data.remote.model.BaseResponse
 import com.stugram.app.data.remote.model.ChatMessageModel
+import com.stugram.app.data.remote.model.ChatReplayEventsData
 import com.stugram.app.data.remote.model.GroupMemberModel
 import com.stugram.app.data.remote.model.PaginatedResponse
 import com.stugram.app.data.remote.model.MessageDeleteResult
@@ -23,6 +24,14 @@ import retrofit2.http.Query
 import retrofit2.http.DELETE
 
 interface GroupChatApi {
+    @Multipart
+    @POST("group-chats")
+    suspend fun createGroupChat(
+        @Part("name") name: RequestBody,
+        @Part("memberIds") memberIds: RequestBody,
+        @Part avatar: MultipartBody.Part? = null
+    ): Response<BaseResponse<GroupConversationModel>>
+
     @POST("group-chats/{groupId}/leave")
     suspend fun leaveGroup(
         @Path("groupId") groupId: String
@@ -44,6 +53,13 @@ interface GroupChatApi {
         @Query("page") page: Int,
         @Query("limit") limit: Int
     ): Response<PaginatedResponse<GroupConversationModel>>
+
+    @GET("group-chats/events")
+    suspend fun getGroupEvents(
+        @Query("groupId") groupId: String,
+        @Query("after") after: Long,
+        @Query("limit") limit: Int
+    ): Response<BaseResponse<ChatReplayEventsData>>
 
     @GET("group-chats/{groupId}")
     suspend fun getGroupChatDetail(@Path("groupId") groupId: String): Response<BaseResponse<GroupConversationModel>>
@@ -80,7 +96,8 @@ interface GroupChatApi {
         @Path("groupId") groupId: String,
         @Part media: MultipartBody.Part,
         @Part("messageType") messageType: RequestBody,
-        @Part("replyToMessageId") replyToMessageId: RequestBody? = null
+        @Part("replyToMessageId") replyToMessageId: RequestBody? = null,
+        @Part("clientId") clientId: RequestBody? = null
     ): Response<BaseResponse<ChatMessageModel>>
 
     @PATCH("group-chats/{groupId}/messages/{messageId}/seen")

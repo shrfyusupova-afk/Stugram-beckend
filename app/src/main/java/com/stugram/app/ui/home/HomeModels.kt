@@ -16,6 +16,7 @@ data class PostData(
     val user: String, 
     val authorFullName: String? = null,
     val image: String? = null,
+    val thumbnailUrl: String? = null,
     val userAvatar: String? = null,
     val caption: String = "Love your mine #lovetoyou #foryourpage #beautifull #popular #peoplefrost",
     val likes: Int = 1245,
@@ -24,6 +25,8 @@ data class PostData(
     val isLiked: Boolean = false,
     val isSaved: Boolean = false,
     val isVideo: Boolean = false,
+    val mediaAspectRatio: Float? = null,
+    val authorFollowStatus: String? = null,
     val createdAt: String? = null
 )
 
@@ -83,3 +86,9 @@ data class CommentData(
     val likes: Int = 0,
     val replies: List<CommentData> = emptyList()
 )
+
+fun mediaAspectRatioFromDimensions(width: Int?, height: Int?): Float? {
+    val safeWidth = width?.takeIf { it > 0 } ?: return null
+    val safeHeight = height?.takeIf { it > 0 } ?: return null
+    return safeWidth.toFloat() / safeHeight.toFloat()
+}

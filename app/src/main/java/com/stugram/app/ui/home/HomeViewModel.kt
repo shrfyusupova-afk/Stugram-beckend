@@ -16,12 +16,17 @@ import com.stugram.app.data.repository.FollowRepository
 import com.stugram.app.data.repository.NotificationRepository
 import com.stugram.app.data.repository.ChatRepository
 import com.stugram.app.data.repository.GroupChatRepository
+import com.stugram.app.data.repository.MessagesInboxCache
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val postRepository = PostRepository()
@@ -43,6 +48,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     var showCameraView by mutableStateOf(false)
     var showNotifications by mutableStateOf(false)
     var unreadNotificationsCount by mutableIntStateOf(0)
+    var unreadMessagesCount by mutableIntStateOf(0)
     var isSettingsOpen by mutableStateOf(false)
     var selectedProfileId by mutableStateOf<Int?>(null)
     var selectedProfileUsername by mutableStateOf<String?>(null)
@@ -92,12 +98,39 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiEvent = MutableSharedFlow<UiEvent>()
     val uiEvent = _uiEvent.asSharedFlow()
 
+    private var homeRefreshJob: Job? = null
+    private var storiesRefreshJob: Job? = null
+    private var reelsRefreshJob: Job? = null
+    private var profileRefreshJob: Job? = null
+    private var messagesRefreshJob: Job? = null
+    private var unreadRefreshJob: Job? = null
+    private var unreadMessagesRefreshJob: Job? = null
+
+    private var lastCurrentUserFetchAtMs = 0L
+    private var lastUnreadFetchAtMs = 0L
+    private var lastUnreadMessagesFetchAtMs = 0L
+    private var cachedInteractionIds: Pair<Set<String>, Set<String>>? = null
+    private var lastInteractionFetchAtMs = 0L
+
+    private companion object {
+        const val CURRENT_USER_TTL_MS = 8_000L
+        const val INTERACTION_IDS_TTL_MS = 15_000L
+        const val UNREAD_COUNT_TTL_MS = 10_000L
+        const val UNREAD_MESSAGES_TTL_MS = 8_000L
+    }
+
     sealed class UiEvent {
         data class ShowSnackbar(val message: String) : UiEvent()
     }
 
     init {
+        viewModelScope.launch {
+            MessagesInboxCache.unreadState.collect { unreadState ->
+                unreadMessagesCount = unreadState.totalUnreadCount
+            }
+        }
         refreshAll()
+        refreshUnreadMessagesSummary(force = true)
         observeFollowEvents()
     }
 
@@ -130,11 +163,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         currentUserFollowingCount = user?.followingCount ?: currentUserFollowingCount
     }
 
-    private suspend fun loadFreshCurrentUser(): com.stugram.app.data.remote.model.ProfileModel? {
+    private suspend fun loadFreshCurrentUser(force: Boolean = false): com.stugram.app.data.remote.model.ProfileModel? {
+        val now = System.currentTimeMillis()
+        currentUserProfile?.let { cached ->
+            if (!force && now - lastCurrentUserFetchAtMs < CURRENT_USER_TTL_MS) return cached
+        }
         val response = runCatching { profileRepository.getCurrentProfile() }.getOrNull()
         val fresh = if (response?.isSuccessful == true) response.body()?.data else null
         if (fresh != null) {
             tokenManager.updateCurrentUser(fresh)
+            currentUserProfile = fresh
+            currentUserFollowingCount = fresh.followingCount
+            lastCurrentUserFetchAtMs = now
             return fresh
         }
         return tokenManager.currentUser.firstOrNull()
@@ -143,6 +183,61 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshAll() {
         refreshHome()
         refreshStories()
+    }
+
+    fun refreshForPullToRefresh() {
+        refreshHome(force = true)
+        refreshStories(force = true)
+    }
+
+    fun refreshForUserSwitch(user: com.stugram.app.data.remote.model.ProfileModel) {
+        clearSessionScopedState(user)
+        refreshHome(force = true)
+        refreshStories(force = true)
+        if (currentTab == 2) refreshReels(force = true)
+        if (currentTab == 3) refreshMessages()
+        if (currentTab == 4) refreshProfile(user.username, force = true)
+    }
+
+    fun refreshAfterContentCreation(type: String) {
+        when (type) {
+            "story" -> {
+                refreshStories(force = true)
+                refreshHome(force = true)
+            }
+            "reel" -> {
+                refreshHome(force = true)
+                refreshReels(force = true)
+                if (currentTab == 4) refreshProfile(currentUserProfile?.username, force = true)
+            }
+            else -> {
+                refreshHome(force = true)
+                if (currentTab == 4) refreshProfile(currentUserProfile?.username, force = true)
+            }
+        }
+    }
+
+    private fun clearSessionScopedState(user: com.stugram.app.data.remote.model.ProfileModel) {
+        MessagesInboxCache.reset()
+        posts = emptyList()
+        reels = emptyList()
+        profilePosts = emptyList()
+        storyProfiles = emptyList()
+        recommendedProfiles = emptyList()
+        homeErrorMessage = null
+        reelsErrorMessage = null
+        profileErrorMessage = null
+        currentUserProfile = user
+        currentUserFollowingCount = user.followingCount
+        feedPage = 1
+        feedHasMore = true
+        reelsPage = 1
+        reelsHasMore = true
+        cachedInteractionIds = null
+        lastInteractionFetchAtMs = 0L
+        lastCurrentUserFetchAtMs = 0L
+        lastUnreadFetchAtMs = 0L
+        lastUnreadMessagesFetchAtMs = 0L
     }
 
     // --- ACTIONS ---
@@ -348,19 +443,21 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // --- REFRESH LOGIC ---
-    fun refreshHome() {
-        viewModelScope.launch {
+    fun refreshHome(force: Boolean = false) {
+        if (homeRefreshJob?.isActive == true) return
+        homeRefreshJob = viewModelScope.launch {
             isHomeRefreshing = true
             homeErrorMessage = null
             try {
                 coroutineScope {
-                    refreshUnreadNotifications()
-                    val currentUserDeferred = async { loadFreshCurrentUser() }
-                    val interactionDeferred = async { loadInteractionIds() }
+                    val unreadDeferred = async { loadUnreadNotifications(force) }
+                    val currentUserDeferred = async { loadFreshCurrentUser(force) }
+                    val interactionDeferred = async { loadInteractionIds(force) }
                     val feedDeferred = async { postRepository.getFeed(1, 20) }
                     val currentUser = currentUserDeferred.await()
                     currentUserProfile = currentUser
                     currentUserFollowingCount = currentUser?.followingCount ?: 0
+                    unreadDeferred.await()
                     val response = feedDeferred.await()
                     if (response.isSuccessful) {
                         val body = response.body()
@@ -377,6 +474,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                 user = model.author.username,
                                 authorFullName = model.author.fullName,
                                 image = model.media.firstOrNull()?.url,
+                                thumbnailUrl = model.media.firstOrNull()?.thumbnailUrl,
                                 userAvatar = model.author.avatar,
                                 caption = model.caption,
                                 likes = model.likesCount,
@@ -384,6 +482,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                 isLiked = likedPostIds.contains(model.id),
                                 isSaved = savedPostIds.contains(model.id),
                                 isVideo = model.media.firstOrNull()?.type == "video",
+                                mediaAspectRatio = model.media.firstOrNull()?.let { mediaAspectRatioFromDimensions(it.width, it.height) },
+                                authorFollowStatus = model.author.followStatus,
                                 createdAt = model.createdAt
                             )
                         }
@@ -438,12 +538,62 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun refreshUnreadNotifications() {
-        viewModelScope.launch {
-            val response = runCatching { notificationRepository.getUnreadCount() }.getOrNull()
-            if (response?.isSuccessful == true) {
-                unreadNotificationsCount = response.body()?.data?.unreadCount ?: 0
+    private suspend fun loadUnreadNotifications(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastUnreadFetchAtMs < UNREAD_COUNT_TTL_MS) return
+        val response = runCatching { notificationRepository.getUnreadCount() }.getOrNull()
+        if (response?.isSuccessful == true) {
+            unreadNotificationsCount = response.body()?.data?.unreadCount ?: 0
+            lastUnreadFetchAtMs = now
+        }
+    }
+
+    fun refreshUnreadNotifications(force: Boolean = false) {
+        if (unreadRefreshJob?.isActive == true) return
+        unreadRefreshJob = viewModelScope.launch {
+            loadUnreadNotifications(force)
+        }
+    }
+
+    private suspend fun loadUnreadMessagesSummary(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastUnreadMessagesFetchAtMs < UNREAD_MESSAGES_TTL_MS) return
+
+        coroutineScope {
+            val summaryDeferred = async { runCatching { chatRepository.getSummary() }.getOrNull() }
+            val groupsDeferred = async { runCatching { groupChatRepository.getGroupChats(page = 1, limit = 50) }.getOrNull() }
+
+            val summaryResponse = summaryDeferred.await()
+            if (summaryResponse?.isSuccessful == true) {
+                val totalUnreadMessages = summaryResponse.body()?.data?.totalUnreadMessages ?: 0
+                MessagesInboxCache.setDirectUnreadSummary(totalUnreadMessages)
             }
+
+            val groupsResponse = groupsDeferred.await()
+            if (groupsResponse?.isSuccessful == true) {
+                val groups = groupsResponse.body()?.data.orEmpty().map { item ->
+                    GroupChat(
+                        backendId = item.id,
+                        name = item.name,
+                        avatar = item.avatar,
+                        lastMessage = item.lastMessage ?: "No messages yet",
+                        time = formatRelativeInboxTime(item.lastMessageAt),
+                        unreadCount = item.unreadCount
+                    )
+                }
+                MessagesInboxCache.updateGroups(groups)
+            }
+
+            if (summaryResponse?.isSuccessful == true || groupsResponse?.isSuccessful == true) {
+                lastUnreadMessagesFetchAtMs = now
+            }
+        }
+    }
+
+    fun refreshUnreadMessagesSummary(force: Boolean = false) {
+        if (unreadMessagesRefreshJob?.isActive == true) return
+        unreadMessagesRefreshJob = viewModelScope.launch {
+            loadUnreadMessagesSummary(force)
         }
     }
 
@@ -466,6 +616,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                             user = model.author.username,
                             authorFullName = model.author.fullName,
                             image = model.media.firstOrNull()?.url,
+                            thumbnailUrl = model.media.firstOrNull()?.thumbnailUrl,
                             userAvatar = model.author.avatar,
                             caption = model.caption,
                             likes = model.likesCount,
@@ -473,6 +624,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                             isLiked = likedPostIds.contains(model.id),
                             isSaved = savedPostIds.contains(model.id),
                             isVideo = model.media.firstOrNull()?.type == "video",
+                            mediaAspectRatio = model.media.firstOrNull()?.let { mediaAspectRatioFromDimensions(it.width, it.height) },
+                            authorFollowStatus = model.author.followStatus,
                             createdAt = model.createdAt
                         )
                     }
@@ -494,10 +647,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun refreshStories() {
-        viewModelScope.launch {
+    fun refreshStories(force: Boolean = false) {
+        if (storiesRefreshJob?.isActive == true) return
+        storiesRefreshJob = viewModelScope.launch {
             try {
-                val currentUser = loadFreshCurrentUser()
+                val currentUser = loadFreshCurrentUser(force)
                 currentUserProfile = currentUser
                 val response = storyRepository.getStoriesFeed(1, 20)
                 if (response.isSuccessful) {
@@ -537,16 +691,17 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         // Search logic moved to SearchViewModel
     }
 
-    fun refreshProfile(username: String? = null) {
-        viewModelScope.launch {
+    fun refreshProfile(username: String? = null, force: Boolean = false) {
+        if (profileRefreshJob?.isActive == true) return
+        profileRefreshJob = viewModelScope.launch {
             isProfileRefreshing = true
             profileErrorMessage = null
             try {
                 coroutineScope {
-                    val interactionDeferred = async { loadInteractionIds() }
+                    val interactionDeferred = async { loadInteractionIds(force) }
                     var targetUsername = username
                     if (targetUsername == null) {
-                        val currentUser = loadFreshCurrentUser()
+                        val currentUser = loadFreshCurrentUser(force)
                         targetUsername = currentUser?.username
                     }
                     
@@ -563,6 +718,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                     user = model.author.username,
                                     authorFullName = model.author.fullName,
                                     image = model.media.firstOrNull()?.url,
+                                    thumbnailUrl = model.media.firstOrNull()?.thumbnailUrl,
                                     userAvatar = model.author.avatar,
                                     caption = model.caption,
                                     likes = model.likesCount,
@@ -570,6 +726,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                     isLiked = likedPostIds.contains(model.id),
                                     isSaved = savedPostIds.contains(model.id),
                                     isVideo = model.media.firstOrNull()?.type == "video",
+                                    mediaAspectRatio = model.media.firstOrNull()?.let { mediaAspectRatioFromDimensions(it.width, it.height) },
+                                    authorFollowStatus = model.author.followStatus,
                                     createdAt = model.createdAt
                                 )
                             }
@@ -586,13 +744,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun refreshReels() {
-        viewModelScope.launch {
+    fun refreshReels(force: Boolean = false) {
+        if (reelsRefreshJob?.isActive == true) return
+        reelsRefreshJob = viewModelScope.launch {
             isReelsRefreshing = true
             reelsErrorMessage = null
             try {
                 coroutineScope {
-                    val interactionDeferred = async { loadInteractionIds() }
+                    val interactionDeferred = async { loadInteractionIds(force) }
                     val response = recommendationRepository.getMyReels(1, 20)
                     if (response.isSuccessful) {
                         val body = response.body()
@@ -609,6 +768,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                 user = model.author.username,
                                 authorFullName = model.author.fullName,
                                 image = model.media.firstOrNull()?.url,
+                                thumbnailUrl = model.media.firstOrNull()?.thumbnailUrl,
                                 userAvatar = model.author.avatar,
                                 caption = model.caption,
                                 likes = model.likesCount,
@@ -616,6 +776,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                 isLiked = likedPostIds.contains(model.id),
                                 isSaved = savedPostIds.contains(model.id),
                                 isVideo = model.media.firstOrNull()?.type == "video",
+                                mediaAspectRatio = model.media.firstOrNull()?.let { mediaAspectRatioFromDimensions(it.width, it.height) },
+                                authorFollowStatus = model.author.followStatus,
                                 createdAt = model.createdAt
                             )
                         }.filter { it.isVideo }
@@ -650,6 +812,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                             user = model.author.username,
                             authorFullName = model.author.fullName,
                             image = model.media.firstOrNull()?.url,
+                            thumbnailUrl = model.media.firstOrNull()?.thumbnailUrl,
                             userAvatar = model.author.avatar,
                             caption = model.caption,
                             likes = model.likesCount,
@@ -657,6 +820,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                             isLiked = likedPostIds.contains(model.id),
                             isSaved = savedPostIds.contains(model.id),
                             isVideo = model.media.firstOrNull()?.type == "video",
+                            mediaAspectRatio = model.media.firstOrNull()?.let { mediaAspectRatioFromDimensions(it.width, it.height) },
+                            authorFollowStatus = model.author.followStatus,
                             createdAt = model.createdAt
                         )
                     }.filter { it.isVideo }
@@ -837,9 +1002,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshMessages() {
-        viewModelScope.launch {
+        if (messagesRefreshJob?.isActive == true) return
+        messagesRefreshJob = viewModelScope.launch {
             isMessagesRefreshing = true
             try {
+                loadUnreadMessagesSummary(force = true)
                 val chats = runCatching { chatRepository.getConversations(page = 1, limit = 1) }.getOrNull()
                 val groups = runCatching { groupChatRepository.getGroupChats(page = 1, limit = 1) }.getOrNull()
                 if (chats?.isSuccessful != true && groups?.isSuccessful != true) {
@@ -850,6 +1017,21 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             }
             isMessagesRefreshing = false
         }
+    }
+
+    private fun formatRelativeInboxTime(timestamp: String?): String {
+        if (timestamp.isNullOrBlank()) return "Now"
+        return runCatching {
+            val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSX", Locale.US)
+            val date = parser.parse(timestamp) ?: return@runCatching "Now"
+            val diff = System.currentTimeMillis() - date.time
+            when {
+                diff < 60_000L -> "Now"
+                diff < 3_600_000L -> "${(diff / 60_000L).coerceAtLeast(1)}m"
+                diff < 86_400_000L -> "${(diff / 3_600_000L).coerceAtLeast(1)}h"
+                else -> SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(date.time))
+            }
+        }.getOrDefault("Now")
     }
 
     fun toggleLike(post: PostData) {
@@ -907,7 +1089,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         updatePostCollections(postId) { it.copy(comments = it.comments + 1) }
     }
 
-    private suspend fun loadInteractionIds(): Pair<Set<String>, Set<String>> = coroutineScope {
+    private suspend fun loadInteractionIds(force: Boolean = false): Pair<Set<String>, Set<String>> = coroutineScope {
+        val now = System.currentTimeMillis()
+        cachedInteractionIds?.let { cached ->
+            if (!force && now - lastInteractionFetchAtMs < INTERACTION_IDS_TTL_MS) return@coroutineScope cached
+        }
         val likedDeferred = async {
             runCatching {
                 interactionRepository.getLikedPosts(limit = 50).body()?.data
@@ -923,7 +1109,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             }.getOrNull().orEmpty()
         }
 
-        likedDeferred.await() to savedDeferred.await()
+        val result = likedDeferred.await() to savedDeferred.await()
+        cachedInteractionIds = result
+        lastInteractionFetchAtMs = now
+        result
     }
 
     private fun updatePostCollections(postId: String, transform: (PostData) -> PostData) {

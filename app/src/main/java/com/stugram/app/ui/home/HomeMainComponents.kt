@@ -3,6 +3,7 @@ package com.stugram.app.ui.home
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -39,6 +40,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -85,6 +87,7 @@ fun HomeTabScreen(
     onCommentsClick: (PostData) -> Unit,
     onProfileClick: (String) -> Unit = {},
     onReelClick: (PostData) -> Unit = {},
+    onToggleAuthorFollow: (PostData, Boolean, (Boolean) -> Unit) -> Unit = { _, _, _ -> },
     onToggleLike: (PostData) -> Unit,
     onToggleSave: (PostData) -> Unit,
     isRefreshing: Boolean,
@@ -218,7 +221,8 @@ fun HomeTabScreen(
                             SuggestedProfilesRow(
                                 profiles = recommendedProfiles,
                                 accentBlue = accentBlue,
-                                isDarkMode = isDarkMode
+                                isDarkMode = isDarkMode,
+                                currentUserId = currentUserProfile?.id
                             )
                         }
                     }
@@ -240,11 +244,15 @@ fun HomeTabScreen(
                         onCommentsClick = onCommentsClick,
                         onReelClick = onReelClick,
                         onProfileClick = { username -> onProfileClick(username) },
+                        currentUserId = currentUserProfile?.id,
+                        onToggleAuthorFollow = onToggleAuthorFollow,
                         onToggleLike = onToggleLike,
                         onToggleSave = onToggleSave
                     )
                     // Keep existing mid-feed recommendations for users who already have a non-empty feed.
-                    if (currentUserFollowingCount != 0 && index == 1) RecommendedProfilesSlider(recommendedProfiles, accentBlue, isDarkMode)
+                    if (currentUserFollowingCount != 0 && index == 1) {
+                        RecommendedProfilesSlider(recommendedProfiles, accentBlue, isDarkMode, currentUserProfile?.id)
+                    }
                 }
 
                 // Never show a blank Home feed structure.
@@ -276,7 +284,8 @@ fun HomeTabScreen(
                                 SuggestedProfilesRow(
                                     profiles = recommendedProfiles,
                                     accentBlue = accentBlue,
-                                    isDarkMode = isDarkMode
+                                    isDarkMode = isDarkMode,
+                                    currentUserId = currentUserProfile?.id
                                 )
                             }
                         }
@@ -436,7 +445,8 @@ private fun SectionHeader(
 private fun SuggestedProfilesRow(
     profiles: List<RecommendedProfile>,
     accentBlue: Color,
-    isDarkMode: Boolean
+    isDarkMode: Boolean,
+    currentUserId: String? = null
 ) {
     LazyRow(
         modifier = Modifier.fillMaxWidth(),
@@ -445,7 +455,12 @@ private fun SuggestedProfilesRow(
     ) {
         items(profiles, key = { it.backendId ?: it.username }) { profile ->
             Box {
-                RecommendedProfileCard(profile = profile, accentBlue = accentBlue, isDarkMode = isDarkMode)
+                RecommendedProfileCard(
+                    profile = profile,
+                    accentBlue = accentBlue,
+                    isDarkMode = isDarkMode,
+                    currentUserId = currentUserId
+                )
                 Surface(
                     color = Color(0xFF0EA5E9),
                     shape = RoundedCornerShape(999.dp),
@@ -561,11 +576,23 @@ fun CreatePostButton(onClick: () -> Unit, accentBlue: Color, isDarkMode: Boolean
         onClick = onClick,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp).height(50.dp),
         shape = RoundedCornerShape(16.dp),
-        color = if (isDarkMode) Color.White.copy(0.08f) else Color.White.copy(0.7f),
-        border = BorderStroke(1.dp, Color.White.copy(0.2f))
+        color = if (isDarkMode) Color.Black.copy(alpha = 0.05f) else Color.White.copy(alpha = 0.05f),
+        border = BorderStroke(0.6.dp, Color.White.copy(alpha = if (isDarkMode) 0.10f else 0.18f))
     ) {
         Box {
-            Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.White.copy(0.1f), Color.Transparent))))
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.White.copy(alpha = if (isDarkMode) 0.055f else 0.075f),
+                                Color.Transparent,
+                                Color.Black.copy(alpha = if (isDarkMode) 0.08f else 0.035f)
+                            )
+                        )
+                    )
+            )
             Row(
                 modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -583,6 +610,43 @@ fun CreatePostButton(onClick: () -> Unit, accentBlue: Color, isDarkMode: Boolean
 }
 
 @Composable
+private fun LiquidGlassOverlay(
+    modifier: Modifier = Modifier,
+    shape: Shape,
+    isDarkMode: Boolean,
+    contentPadding: PaddingValues = PaddingValues(0.dp),
+    content: @Composable BoxScope.() -> Unit
+) {
+    val glassTint = if (isDarkMode) Color.Black.copy(alpha = 0.05f) else Color.White.copy(alpha = 0.05f)
+    val glassBorder = if (isDarkMode) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.18f)
+    val sheenTop = Color.White.copy(alpha = if (isDarkMode) 0.055f else 0.075f)
+    val sheenMid = if (isDarkMode) Color.Black.copy(alpha = 0.03f) else Color.White.copy(alpha = 0.025f)
+    val sheenBottom = if (isDarkMode) Color.Black.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.035f)
+
+    Surface(
+        modifier = modifier.shadow(6.dp, shape, clip = false),
+        color = glassTint,
+        shape = shape,
+        border = BorderStroke(0.55.dp, glassBorder)
+    ) {
+        Box(
+            modifier = Modifier
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            sheenTop,
+                            sheenMid,
+                            sheenBottom
+                        )
+                    )
+                )
+                .padding(contentPadding),
+            content = content
+        )
+    }
+}
+
+@Composable
 fun DashboardPostItem(
     post: PostData,
     accentBlue: Color,
@@ -590,6 +654,8 @@ fun DashboardPostItem(
     onCommentsClick: (PostData) -> Unit,
     onReelClick: (PostData) -> Unit = {},
     onProfileClick: (String) -> Unit,
+    currentUserId: String? = null,
+    onToggleAuthorFollow: (PostData, Boolean, (Boolean) -> Unit) -> Unit = { _, _, _ -> },
     onToggleLike: (PostData) -> Unit = {},
     onToggleSave: (PostData) -> Unit = {}
 ) {
@@ -597,16 +663,25 @@ fun DashboardPostItem(
     var heartOffset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
     var showOptionsSheet by remember { mutableStateOf(false) }
     var showShareSheet by remember { mutableStateOf(false) }
+    var isCaptionExpanded by remember(post.backendId) { mutableStateOf(false) }
+    var shareCount by remember(post.backendId, post.reposts) { mutableIntStateOf(post.reposts) }
+    var authorFollowStatus by remember(post.authorId, post.authorFollowStatus) {
+        mutableStateOf(post.authorFollowStatus?.lowercase()?.trim().orEmpty().ifBlank { "not_following" })
+    }
+    var isAuthorFollowBusy by remember(post.authorId) { mutableStateOf(false) }
     
     val scope = rememberCoroutineScope()
 
     val textColor = Color.White
     val iconColor = Color.White
+    val isOwnPost = authorFollowStatus == "self" ||
+        (!post.authorId.isNullOrBlank() && !currentUserId.isNullOrBlank() && post.authorId == currentUserId)
 
     if (showOptionsSheet) {
         PostOptionsBottomSheet(
             isDarkMode = isDarkMode,
             isSaved = post.isSaved,
+            isOwnPost = isOwnPost,
             onSaveClick = {
                 onToggleSave(post)
                 showOptionsSheet = false
@@ -617,16 +692,30 @@ fun DashboardPostItem(
 
     if (showShareSheet) {
         PostShareBottomSheet(
+            post = post,
             isDarkMode = isDarkMode,
+            onShareCompleted = { sentCount ->
+                if (sentCount > 0) {
+                    shareCount += sentCount
+                }
+            },
             onDismiss = { showShareSheet = false }
         )
     }
+
+    val mediaAspectRatio = (post.mediaAspectRatio ?: if (post.isVideo) 9f / 16f else 1f)
+        .coerceIn(0.56f, 1.25f)
+    val hasCaption = post.caption.isNotBlank()
+    val canExpandCaption = post.caption.length > 18
+    val showAuthorFollow = !post.authorId.isNullOrBlank() &&
+        !isOwnPost &&
+        authorFollowStatus == "not_following"
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 10.dp)
-            .aspectRatio(1f / 1.25f),
+            .aspectRatio(mediaAspectRatio),
         shape = RoundedCornerShape(32.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         colors = CardDefaults.cardColors(containerColor = Color.Transparent)
@@ -649,12 +738,19 @@ fun DashboardPostItem(
                     })
                 }
             ) {
-                AppBanner(
-                    imageModel = post.image,
-                    title = post.user,
-                    modifier = Modifier.fillMaxSize(),
-                    isDarkMode = true // Rasm fonida doim oq matn yaxshi ko'rinishi uchun
-                )
+                if (post.isVideo && !post.image.isNullOrBlank()) {
+                    ReelVideoPlayer(
+                        url = post.image,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    AppBanner(
+                        imageModel = post.image,
+                        title = post.user,
+                        modifier = Modifier.fillMaxSize(),
+                        isDarkMode = true
+                    )
+                }
                 
                 // Bottom Gradient for readability
                 Box(
@@ -672,45 +768,74 @@ fun DashboardPostItem(
                 if (showLikeHeart) PopLikeAnimation(heartOffset)
             }
 
+            if (isCaptionExpanded) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.18f))
+                )
+            }
+
             // Header Overlay
             Row(
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    color = Color.Black.copy(alpha = 0.3f),
-                    shape = RoundedCornerShape(50.dp),
-                    border = BorderStroke(0.5.dp, Color.White.copy(0.2f))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LiquidGlassOverlay(
+                        shape = RoundedCornerShape(50.dp),
+                        isDarkMode = isDarkMode,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                     ) {
-                        AppAvatar(
-                            imageModel = post.userAvatar,
-                            name = post.user,
-                            username = post.user,
-                            modifier = Modifier.size(28.dp).clickable { onProfileClick(post.user) },
-                            isDarkMode = true,
-                            fontSize = 10.sp
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = post.user,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                            modifier = Modifier.clickable { onProfileClick(post.user) }
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            AppAvatar(
+                                imageModel = post.userAvatar,
+                                name = post.user,
+                                username = post.user,
+                                modifier = Modifier.size(28.dp).clickable { onProfileClick(post.user) },
+                                isDarkMode = true,
+                                fontSize = 10.sp
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = post.user,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                modifier = Modifier.clickable { onProfileClick(post.user) }
+                            )
+                        }
+                    }
+
+                    if (showAuthorFollow) {
+                        LiquidGlassOverlay(
+                            shape = RoundedCornerShape(50.dp),
+                            isDarkMode = isDarkMode,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
+                            modifier = Modifier.padding(start = 8.dp)
+                        ) {
+                            Text(
+                                text = if (isAuthorFollowBusy) "..." else "Follow",
+                                color = accentBlue,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Black,
+                                modifier = Modifier.clickable(enabled = !isAuthorFollowBusy) {
+                                    isAuthorFollowBusy = true
+                                    onToggleAuthorFollow(post, false) { isFollowing ->
+                                        authorFollowStatus = if (isFollowing) "following" else "not_following"
+                                        isAuthorFollowBusy = false
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
 
-                Surface(
+                LiquidGlassOverlay(
                     modifier = Modifier.size(40.dp),
-                    color = Color.Black.copy(alpha = 0.3f),
                     shape = CircleShape,
-                    border = BorderStroke(0.5.dp, Color.White.copy(0.2f))
+                    isDarkMode = isDarkMode
                 ) {
                     IconButton(onClick = { showOptionsSheet = true }) {
                         Icon(Icons.Default.MoreHoriz, null, tint = Color.White, modifier = Modifier.size(20.dp))
@@ -722,66 +847,125 @@ fun DashboardPostItem(
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(start = 20.dp, bottom = 20.dp, end = 80.dp)
+                    .padding(start = 14.dp, bottom = 14.dp, end = 14.dp)
             ) {
-                // Stats Row with Blur-like background
-                Surface(
-                    color = Color.White.copy(alpha = 0.15f),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(0.5.dp, Color.White.copy(0.1f))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { onToggleLike(post) }) {
-                            Icon(
-                                if (post.isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                                null,
-                                tint = if (post.isLiked) Color.Red else Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(post.likes.toString(), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                LiquidGlassOverlay(
+                    shape = RoundedCornerShape(20.dp),
+                    isDarkMode = isDarkMode,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            if (canExpandCaption) {
+                                isCaptionExpanded = !isCaptionExpanded
+                            }
                         }
-                        
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { onCommentsClick(post) }) {
-                            Icon(Icons.Outlined.ChatBubbleOutline, null, tint = Color.White, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(post.comments.toString(), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .animateContentSize()
+                            .padding(horizontal = 12.dp, vertical = if (hasCaption) 9.dp else 8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { onToggleLike(post) }) {
+                                Icon(
+                                    if (post.isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                    null,
+                                    tint = if (post.isLiked) Color.Red else Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(post.likes.toString(), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { onCommentsClick(post) }) {
+                                Icon(Icons.Outlined.ChatBubbleOutline, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(post.comments.toString(), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { showShareSheet = true }) {
+                                Icon(Icons.AutoMirrored.Rounded.Send, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(shareCount.toString(), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
 
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { showShareSheet = true }) {
-                            Icon(Icons.Rounded.Repeat, null, tint = Color.White, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("229", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold) // Rasmda ko'rsatilgan statik qiymat
+                        if (hasCaption) {
+                            Spacer(Modifier.height(6.dp))
+
+                            if (isCaptionExpanded) {
+                                Text(
+                                    text = post.caption,
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = Int.MAX_VALUE,
+                                    overflow = TextOverflow.Clip,
+                                    lineHeight = 20.sp,
+                                    modifier = Modifier.clickable {
+                                        if (canExpandCaption) isCaptionExpanded = false
+                                    }
+                                )
+                            } else {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = post.caption,
+                                        color = Color.White,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        lineHeight = 20.sp,
+                                        modifier = Modifier
+                                            .weight(1f, fill = false)
+                                            .clickable {
+                                                if (canExpandCaption) isCaptionExpanded = true
+                                            }
+                                    )
+                                    if (canExpandCaption) {
+                                        Text(
+                                            text = "...",
+                                            color = accentBlue,
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.Black,
+                                            modifier = Modifier
+                                                .padding(start = 4.dp)
+                                                .clickable { isCaptionExpanded = true }
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (canExpandCaption && isCaptionExpanded) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = "qisqartirish",
+                                    color = accentBlue,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.clickable { isCaptionExpanded = false }
+                                )
+                            }
+
+                            if (post.caption.contains("#")) {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = post.caption.split(" ").filter { it.startsWith("#") }.joinToString(" "),
+                                    color = Color.White.copy(alpha = 0.72f),
+                                    fontSize = 13.sp,
+                                    maxLines = if (isCaptionExpanded) Int.MAX_VALUE else 1,
+                                    overflow = if (isCaptionExpanded) TextOverflow.Clip else TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                // Caption
-                Text(
-                    text = post.caption,
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    lineHeight = 20.sp
-                )
-                
-                if (post.caption.contains("#")) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = post.caption.split(" ").filter { it.startsWith("#") }.joinToString(" "),
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
                 }
             }
         }
@@ -790,7 +974,13 @@ fun DashboardPostItem(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PostOptionsBottomSheet(isDarkMode: Boolean, isSaved: Boolean, onSaveClick: () -> Unit, onDismiss: () -> Unit) {
+fun PostOptionsBottomSheet(
+    isDarkMode: Boolean,
+    isSaved: Boolean,
+    isOwnPost: Boolean = false,
+    onSaveClick: () -> Unit,
+    onDismiss: () -> Unit
+) {
     var showReportOptions by remember { mutableStateOf(false) }
     val textColor = if (isDarkMode) Color.White else Color.Black
     val containerColor = if (isDarkMode) Color(0xFF1A1A1A) else Color.White
@@ -828,11 +1018,13 @@ fun PostOptionsBottomSheet(isDarkMode: Boolean, isSaved: Boolean, onSaveClick: (
 
                 HorizontalDivider(color = textColor.copy(0.1f), modifier = Modifier.padding(vertical = 8.dp))
 
-                OptionItem(Icons.Outlined.PersonAdd, "Obuna bo'lish", textColor) { onDismiss() }
-                OptionItem(Icons.Outlined.VisibilityOff, "Yashirish", textColor) { onDismiss() }
-                OptionItem(Icons.Outlined.StarOutline, "Qiziqarli", textColor) { onDismiss() }
-                OptionItem(Icons.Outlined.SentimentDissatisfied, "Qiziq emas", textColor) { onDismiss() }
-                OptionItem(Icons.Outlined.Flag, "Shikoyat qilish", Color.Red) { showReportOptions = true }
+                if (!isOwnPost) {
+                    OptionItem(Icons.Outlined.PersonAdd, "Obuna bo'lish", textColor) { onDismiss() }
+                    OptionItem(Icons.Outlined.VisibilityOff, "Yashirish", textColor) { onDismiss() }
+                    OptionItem(Icons.Outlined.StarOutline, "Qiziqarli", textColor) { onDismiss() }
+                    OptionItem(Icons.Outlined.SentimentDissatisfied, "Qiziq emas", textColor) { onDismiss() }
+                    OptionItem(Icons.Outlined.Flag, "Shikoyat qilish", Color.Red) { showReportOptions = true }
+                }
             } else {
                 Text(
                     "Nima uchun ushbu post haqida xabar bermoqchisiz?",
@@ -867,12 +1059,67 @@ fun OptionItem(icon: androidx.compose.ui.graphics.vector.ImageVector?, text: Str
     }
 }
 
+private data class PostShareTarget(
+    val id: String,
+    val name: String,
+    val username: String?,
+    val avatar: String?
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PostShareBottomSheet(isDarkMode: Boolean, onDismiss: () -> Unit) {
+fun PostShareBottomSheet(
+    post: PostData,
+    isDarkMode: Boolean,
+    onShareCompleted: (Int) -> Unit = {},
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
     val textColor = if (isDarkMode) Color.White else Color.Black
     val containerColor = if (isDarkMode) Color(0xFF1A1A1A) else Color.White
     var searchQuery by remember { mutableStateOf("") }
+    var conversations by remember { mutableStateOf<List<PostShareTarget>>(emptyList()) }
+    var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var isSending by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    val chatRepository = remember {
+        RetrofitClient.init(context.applicationContext)
+        com.stugram.app.data.repository.ChatRepository()
+    }
+    val scope = rememberCoroutineScope()
+    val filteredConversations = remember(conversations, searchQuery) {
+        val query = searchQuery.trim()
+        if (query.isBlank()) {
+            conversations
+        } else {
+            conversations.filter {
+                it.name.contains(query, ignoreCase = true) ||
+                    it.username?.contains(query, ignoreCase = true) == true
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        isLoading = true
+        errorMessage = null
+        val response = runCatching { chatRepository.getConversations(page = 1, limit = 50) }.getOrNull()
+        if (response?.isSuccessful == true) {
+            conversations = response.body()?.data.orEmpty()
+                .mapNotNull { item ->
+                    val target = item.otherParticipant ?: return@mapNotNull null
+                    PostShareTarget(
+                        id = item.id,
+                        name = target.fullName.takeIf { it.isNotBlank() } ?: target.username,
+                        username = target.username,
+                        avatar = target.avatar
+                    )
+                }
+        } else {
+            errorMessage = response?.message()?.ifBlank { "Could not load chats" } ?: "Could not load chats"
+        }
+        isLoading = false
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -880,7 +1127,6 @@ fun PostShareBottomSheet(isDarkMode: Boolean, onDismiss: () -> Unit) {
         dragHandle = { BottomSheetDefaults.DragHandle(color = textColor.copy(0.3f)) }
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            // Search Input
             TextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
@@ -898,31 +1144,117 @@ fun PostShareBottomSheet(isDarkMode: Boolean, onDismiss: () -> Unit) {
                 leadingIcon = { Icon(Icons.Default.Search, null, tint = textColor.copy(0.6f)) }
             )
 
-            // User List (Horizontal scrollable)
-            LazyRow(
-                contentPadding = PaddingValues(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                items(10) { i ->
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(contentAlignment = Alignment.BottomEnd) {
-                            AppAvatar(
-                                imageModel = null,
-                                name = "User $i",
-                                username = "user_$i",
-                                modifier = Modifier.size(64.dp),
-                                isDarkMode = isDarkMode,
-                                fontSize = 18.sp
-                            )
+            if (isLoading) {
+                Box(modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = Color(0xFF00A3FF), strokeWidth = 2.dp)
+                }
+            } else {
+                if (filteredConversations.isNotEmpty()) {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        items(filteredConversations, key = { it.id }) { target ->
+                            val isSelected = selectedIds.contains(target.id)
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier
+                                    .width(72.dp)
+                                    .clickable {
+                                        selectedIds = if (isSelected) selectedIds - target.id else selectedIds + target.id
+                                    }
+                            ) {
+                                Box(contentAlignment = Alignment.BottomEnd) {
+                                    AppAvatar(
+                                        imageModel = target.avatar,
+                                        name = target.name,
+                                        username = target.username,
+                                        modifier = Modifier
+                                            .size(64.dp)
+                                            .border(
+                                                width = if (isSelected) 2.dp else 0.dp,
+                                                color = Color(0xFF00A3FF),
+                                                shape = CircleShape
+                                            ),
+                                        isDarkMode = isDarkMode,
+                                        fontSize = 18.sp
+                                    )
+                                    if (isSelected) {
+                                        Surface(
+                                            color = Color(0xFF00A3FF),
+                                            shape = CircleShape,
+                                            modifier = Modifier.size(22.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(Icons.Default.Check, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                                            }
+                                        }
+                                    }
+                                }
+                                Text(
+                                    target.name,
+                                    color = textColor,
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.padding(top = 4.dp),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
-                        Text("User $i", color = textColor, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
                     }
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 260.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(filteredConversations, key = { it.id }) { target ->
+                            val isSelected = selectedIds.contains(target.id)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(if (isSelected) Color(0xFF00A3FF).copy(alpha = 0.12f) else textColor.copy(alpha = 0.05f))
+                                    .clickable {
+                                        selectedIds = if (isSelected) selectedIds - target.id else selectedIds + target.id
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AppAvatar(
+                                    imageModel = target.avatar,
+                                    name = target.name,
+                                    username = target.username,
+                                    modifier = Modifier.size(44.dp),
+                                    isDarkMode = isDarkMode,
+                                    fontSize = 14.sp
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(target.name, color = textColor, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    target.username?.let {
+                                        Text("@$it", color = textColor.copy(alpha = 0.6f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                                if (isSelected) {
+                                    Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF00A3FF))
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Text(
+                        text = errorMessage ?: "No chats found yet",
+                        color = textColor.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 20.dp)
+                    )
                 }
             }
 
             HorizontalDivider(color = textColor.copy(0.1f))
 
-            // Fixed Action Buttons
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -933,6 +1265,70 @@ fun PostShareBottomSheet(isDarkMode: Boolean, onDismiss: () -> Unit) {
                 ShareActionItem(Icons.Outlined.Share, "Ulashish", textColor)
                 ShareActionItem(Icons.Outlined.ContentCopy, "Havolani nusxalash", textColor)
                 ShareActionItem(Icons.AutoMirrored.Outlined.Send, "Yuborish", textColor)
+            }
+
+            Button(
+                onClick = {
+                    val targets = selectedIds.toList()
+                    if (targets.isEmpty() || isSending) return@Button
+                    isSending = true
+                    errorMessage = null
+                    scope.launch {
+                        val payload = buildStructuredPayload(
+                            ChatStructuredPayload(
+                                type = if (post.isVideo) ChatStructuredType.REEL else ChatStructuredType.POST,
+                                title = post.caption.takeIf { it.isNotBlank() }?.take(70) ?: "@${post.user}",
+                                subtitle = "@${post.user}",
+                                tertiary = if (post.isVideo) "Shared reel" else "Shared post",
+                                imageUrl = post.image,
+                                targetId = post.backendId ?: post.id.toString()
+                            )
+                        )
+                        var successCount = 0
+                        targets.forEach { conversationId ->
+                            val response = runCatching {
+                                chatRepository.sendMessage(
+                                    conversationId,
+                                    com.stugram.app.data.remote.model.SendChatMessageRequest(
+                                        text = payload,
+                                        messageType = "text"
+                                    )
+                                )
+                            }.getOrNull()
+                            if (response?.isSuccessful == true) {
+                                successCount += 1
+                            }
+                        }
+                        isSending = false
+                        if (successCount > 0) {
+                            onShareCompleted(successCount)
+                            onDismiss()
+                        } else {
+                            errorMessage = "Could not send this post right now"
+                        }
+                    }
+                },
+                enabled = selectedIds.isNotEmpty() && !isSending,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .height(52.dp),
+                shape = RoundedCornerShape(18.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00A3FF))
+            ) {
+                if (isSending) {
+                    CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                } else {
+                    Text("Send to ${selectedIds.size} people", color = Color.White, fontWeight = FontWeight.ExtraBold)
+                }
+            }
+            errorMessage?.let {
+                Text(
+                    text = it,
+                    color = Color.Red.copy(alpha = 0.9f),
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                )
             }
             Spacer(Modifier.height(16.dp))
         }
@@ -974,23 +1370,35 @@ fun PostStatItem(icon: ImageVector, count: String, isDarkMode: Boolean, tint: Co
 }
 
 @Composable
-fun RecommendedProfilesSlider(profiles: List<RecommendedProfile>, accentBlue: Color, isDarkMode: Boolean) {
+fun RecommendedProfilesSlider(
+    profiles: List<RecommendedProfile>,
+    accentBlue: Color,
+    isDarkMode: Boolean,
+    currentUserId: String? = null
+) {
     Column(modifier = Modifier.padding(vertical = 12.dp)) {
         Text("Tavsiya etilganlar", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = if (isDarkMode) Color.White else Color.Black, modifier = Modifier.padding(start = 20.dp, bottom = 12.dp))
         LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            items(profiles) { profile -> RecommendedProfileCard(profile, accentBlue, isDarkMode) }
+            items(profiles) { profile -> RecommendedProfileCard(profile, accentBlue, isDarkMode, currentUserId) }
         }
     }
 }
 
 @Composable
-fun RecommendedProfileCard(profile: RecommendedProfile, accentBlue: Color, isDarkMode: Boolean) {
-    var followStatus by remember(profile.backendId) {
-        mutableStateOf(profile.followStatus.lowercase().ifBlank {
+fun RecommendedProfileCard(
+    profile: RecommendedProfile,
+    accentBlue: Color,
+    isDarkMode: Boolean,
+    currentUserId: String? = null
+) {
+    val isOwnProfile = !currentUserId.isNullOrBlank() && profile.backendId == currentUserId
+    var followStatus by remember(profile.backendId, isOwnProfile) {
+        mutableStateOf(if (isOwnProfile) "self" else profile.followStatus.lowercase().ifBlank {
             if (profile.isFollowed) "following" else "not_following"
         })
     }
     val isFollowed = followStatus == "following"
+    val isSelf = followStatus == "self"
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val followRepository = remember { com.stugram.app.data.repository.FollowRepository() }
@@ -1051,13 +1459,14 @@ fun RecommendedProfileCard(profile: RecommendedProfile, accentBlue: Color, isDar
                     .padding(12.dp)
             ) {
                 val buttonColor by animateColorAsState(
-                    if (isFollowed) Color.White.copy(alpha = 0.1f) else accentBlue,
+                    if (isFollowed || isSelf) Color.White.copy(alpha = 0.1f) else accentBlue,
                     animationSpec = tween(300),
                     label = "buttonColor"
                 )
                 
                 Surface(
                     onClick = {
+                        if (isSelf) return@Surface
                         val userId = profile.backendId ?: return@Surface
                         val previous = followStatus
                         val willFollow = previous == "not_following"
@@ -1344,12 +1753,14 @@ data class NotificationData(
     val isRead: Boolean = false
 )
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun GlassSlidingNavigation(
     selectedTab: Int,
     onTabSelected: (Int) -> Unit,
     onProfileLongPress: () -> Unit = {},
     isDarkMode: Boolean,
+    unreadMessagesCount: Int = 0,
     modifier: Modifier = Modifier
 ) {
     val items = listOf(
@@ -1360,9 +1771,19 @@ fun GlassSlidingNavigation(
         TabItem("Profil", Icons.Rounded.Person)
     )
 
-    val backgroundColor = if (isDarkMode) Color(0xFF121212).copy(alpha = 0.8f) else Color.White.copy(alpha = 0.8f)
+    val backgroundColor = if (isDarkMode) Color.Black.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.18f)
     val contentColor = if (isDarkMode) Color.White else Color.Black
     val accentBlue = Color(0xFF00A3FF)
+    val waterTransition = rememberInfiniteTransition(label = "nav_liquid_water")
+    val waterOffset by waterTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 4200, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "nav_liquid_water_offset"
+    )
 
     Surface(
         modifier = modifier
@@ -1370,8 +1791,8 @@ fun GlassSlidingNavigation(
             .height(64.dp),
         shape = RoundedCornerShape(32.dp),
         color = backgroundColor,
-        shadowElevation = 12.dp,
-        border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.2f))
+        shadowElevation = 10.dp,
+        border = BorderStroke(0.55.dp, Color.White.copy(alpha = if (isDarkMode) 0.12f else 0.26f))
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             Box(
@@ -1379,7 +1800,30 @@ fun GlassSlidingNavigation(
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
-                            listOf(Color.White.copy(alpha = 0.1f), Color.Transparent)
+                            listOf(
+                                Color.White.copy(alpha = if (isDarkMode) 0.08f else 0.18f),
+                                Color.White.copy(alpha = if (isDarkMode) 0.02f else 0.06f),
+                                Color.Black.copy(alpha = if (isDarkMode) 0.16f else 0.04f)
+                            )
+                        )
+                    )
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        translationX = (waterOffset - 0.5f) * 26f
+                        translationY = (0.5f - waterOffset) * 8f
+                        alpha = 0.72f
+                    }
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                accentBlue.copy(alpha = 0.12f),
+                                Color.White.copy(alpha = if (isDarkMode) 0.04f else 0.10f),
+                                Color.Transparent
+                            ),
+                            radius = 250f
                         )
                     )
             )
@@ -1401,17 +1845,39 @@ fun GlassSlidingNavigation(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(accentBlue, RoundedCornerShape(24.dp))
                         .shadow(4.dp, RoundedCornerShape(24.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    accentBlue.copy(alpha = 0.92f),
+                                    accentBlue.copy(alpha = 0.72f),
+                                    Color.White.copy(alpha = 0.16f)
+                                )
+                            ),
+                            RoundedCornerShape(24.dp)
+                        )
                 ) {
-                    // Glossy shine
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .fillMaxHeight(0.5f)
                             .background(
                                 Brush.verticalGradient(
-                                    listOf(Color.White.copy(alpha = 0.3f), Color.Transparent)
+                                    listOf(Color.White.copy(alpha = 0.36f), Color.Transparent)
+                                )
+                            )
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                translationX = (0.5f - waterOffset) * 14f
+                                alpha = 0.52f
+                            }
+                            .background(
+                                Brush.radialGradient(
+                                    listOf(Color.White.copy(alpha = 0.25f), Color.Transparent),
+                                    radius = 95f
                                 )
                             )
                     )
@@ -1425,14 +1891,14 @@ fun GlassSlidingNavigation(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight()
-                            .pointerInput(index) {
-                                detectTapGestures(
-                                    onLongPress = {
-                                        if (index == 4) onProfileLongPress()
-                                    },
-                                    onTap = { onTabSelected(index) }
-                                )
-                            },
+                            .combinedClickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { onTabSelected(index) },
+                                onLongClick = {
+                                    if (index == 4) onProfileLongPress()
+                                }
+                            ),
                         contentAlignment = Alignment.Center
                     ) {
                         val color by animateColorAsState(
@@ -1452,6 +1918,23 @@ fun GlassSlidingNavigation(
                                 .size(24.dp)
                                 .graphicsLayer(scaleX = scale, scaleY = scale)
                         )
+                        if (index == 3 && unreadMessagesCount > 0) {
+                            Surface(
+                                color = Color.Red,
+                                shape = RoundedCornerShape(999.dp),
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .offset(x = (-8).dp, y = 10.dp)
+                            ) {
+                                Text(
+                                    text = unreadMessagesCount.coerceAtMost(99).let { if (it == 99 && unreadMessagesCount > 99) "99+" else it.toString() },
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }

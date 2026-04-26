@@ -29,7 +29,6 @@ import com.stugram.app.data.remote.model.AccountProfileItemModel
 import com.stugram.app.data.repository.ProfileRepository
 import com.stugram.app.ui.auth.components.LoadingOverlay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -49,6 +48,7 @@ fun ProfileSwitcherModal(
 
     val sessions by tokenManager.sessions.collectAsState(initial = emptyList())
     val activeSessionId by tokenManager.activeSessionId.collectAsState(initial = null)
+    val activeProfileUsername = sessions.firstOrNull { it.id == activeSessionId }?.user?.username
     var isSwitching by remember { mutableStateOf(false) }
 
     // Fetch profiles under active account for display (optional; safe if endpoint is unavailable yet)
@@ -60,14 +60,42 @@ fun ProfileSwitcherModal(
     var isLoading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
+    fun localProfiles(): List<AccountProfileItemModel> =
+        sessions.map { session ->
+            AccountProfileItemModel(
+                id = session.user.id,
+                username = session.user.username,
+                fullName = session.user.fullName,
+                avatar = session.user.avatar,
+                banner = session.user.banner,
+                type = session.user.type ?: "student",
+                region = session.user.region.orEmpty(),
+                district = session.user.district.orEmpty(),
+                school = session.user.school.orEmpty(),
+                createdAt = session.user.createdAt
+            )
+        }.distinctBy { it.id }
+
+    LaunchedEffect(sessions) {
+        if (profiles.isEmpty() && sessions.isNotEmpty()) {
+            profiles = localProfiles()
+            isLoading = false
+        }
+    }
+
+    LaunchedEffect(activeSessionId) {
         isLoading = true
         error = null
         val response = runCatching { profileRepository.getMyProfilesAll() }.getOrNull()
         if (response?.isSuccessful == true) {
-            profiles = response.body()?.data.orEmpty()
+            profiles = response.body()?.data.orEmpty().ifEmpty { localProfiles() }
         } else {
-            error = response?.message()?.ifBlank { "Could not load profiles" } ?: "Could not load profiles"
+            profiles = localProfiles()
+            error = if (profiles.isEmpty()) {
+                response?.message()?.ifBlank { "Could not load profiles" } ?: "Could not load profiles"
+            } else {
+                null
+            }
         }
         isLoading = false
     }
@@ -111,15 +139,13 @@ fun ProfileSwitcherModal(
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(18.dp))
                                 .background(glass)
-                                .border(0.5.dp, Color.Gray.copy(alpha = 0.2f), RoundedCornerShape(18.dp))
-                                .clickable {
+	                                .border(0.5.dp, Color.Gray.copy(alpha = 0.2f), RoundedCornerShape(18.dp))
+	                                .clickable {
+                                    if (isSwitching || isActive) return@clickable
                                     scope.launch {
                                         isSwitching = true
-                                        val startedAt = System.currentTimeMillis()
                                         val ok = tokenManager.switchToSession(session.id)
                                         if (ok) {
-                                            val elapsed = System.currentTimeMillis() - startedAt
-                                            if (elapsed < 2800) delay(2800 - elapsed)
                                             onSwitched()
                                         } else {
                                             isSwitching = false
@@ -170,9 +196,14 @@ fun ProfileSwitcherModal(
                                 error = null
                                 val response = runCatching { profileRepository.getMyProfilesAll() }.getOrNull()
                                 if (response?.isSuccessful == true) {
-                                    profiles = response.body()?.data.orEmpty()
+                                    profiles = response.body()?.data.orEmpty().ifEmpty { localProfiles() }
                                 } else {
-                                    error = response?.message()?.ifBlank { "Could not load profiles" } ?: "Could not load profiles"
+                                    profiles = localProfiles()
+                                    error = if (profiles.isEmpty()) {
+                                        response?.message()?.ifBlank { "Could not load profiles" } ?: "Could not load profiles"
+                                    } else {
+                                        null
+                                    }
                                 }
                                 isLoading = false
                             }
@@ -186,8 +217,9 @@ fun ProfileSwitcherModal(
                             .weight(1f, fill = true),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        items(profiles, key = { it.id }) { profile ->
-                            Row(
+	                        items(profiles, key = { it.id }) { profile ->
+	                            val isActiveProfile = profile.username == activeProfileUsername
+	                            Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(18.dp))
@@ -195,18 +227,16 @@ fun ProfileSwitcherModal(
                                         Brush.verticalGradient(
                                             listOf(glass, Color.Transparent)
                                         )
-                                    )
-                                    .border(0.5.dp, Color.Gray.copy(alpha = 0.2f), RoundedCornerShape(18.dp))
-                                    .clickable {
-                                        scope.launch {
-                                            isSwitching = true
-                                            val startedAt = System.currentTimeMillis()
+	                                    )
+	                                    .border(0.5.dp, Color.Gray.copy(alpha = 0.2f), RoundedCornerShape(18.dp))
+	                                    .clickable {
+	                                        if (isSwitching || isActiveProfile) return@clickable
+	                                        scope.launch {
+	                                            isSwitching = true
                                             val result = runCatching { profileRepository.switchProfile(profile.id) }.getOrNull()
                                             val auth = result?.body()?.data
                                             if (result?.isSuccessful == true && auth != null) {
                                                 tokenManager.saveSession(auth.user, auth.accessToken, auth.refreshToken)
-                                                val elapsed = System.currentTimeMillis() - startedAt
-                                                if (elapsed < 2800) delay(2800 - elapsed)
                                                 onSwitched()
                                             } else {
                                                 isSwitching = false
@@ -225,12 +255,15 @@ fun ProfileSwitcherModal(
                                     fontSize = 16.sp
                                 )
                                 Spacer(Modifier.width(12.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(profile.fullName, color = contentColor, fontWeight = FontWeight.Bold, maxLines = 1)
-                                    Text("@${profile.username} • ${profile.type}", color = Color.Gray, fontSize = 12.sp, maxLines = 1)
-                                }
-                            }
-                        }
+	                                Column(modifier = Modifier.weight(1f)) {
+	                                    Text(profile.fullName, color = contentColor, fontWeight = FontWeight.Bold, maxLines = 1)
+	                                    Text("@${profile.username} • ${profile.type}", color = Color.Gray, fontSize = 12.sp, maxLines = 1)
+	                                }
+	                                if (isActiveProfile) {
+	                                    Icon(Icons.Default.CheckCircle, null, tint = Color.Green.copy(alpha = 0.85f))
+	                                }
+	                            }
+	                        }
 
                         item(key = "add_profile") {
                             Row(

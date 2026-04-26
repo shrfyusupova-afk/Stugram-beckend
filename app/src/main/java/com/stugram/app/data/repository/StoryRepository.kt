@@ -24,11 +24,12 @@ class StoryRepository {
     suspend fun createStory(context: Context, mediaUri: Uri, caption: String?): Response<BaseResponse<StoryModel>> {
         val mimeType = context.contentResolver.getType(mediaUri) ?: "image/*"
         val file = context.copyUriToTempFile(mediaUri, "story", mimeType)
+        val uploadMimeType = normalizeMediaUploadMimeType(mimeType, file.name)
         return try {
             val mediaPart = MultipartBody.Part.createFormData(
                 "media",
                 file.name,
-                file.asRequestBody(mimeType.toMediaType())
+                file.asRequestBody(uploadMimeType.toMediaType())
             )
             val captionPart = caption?.toRequestBody("text/plain".toMediaType())
             mediaApi.createStory(mediaPart, captionPart)

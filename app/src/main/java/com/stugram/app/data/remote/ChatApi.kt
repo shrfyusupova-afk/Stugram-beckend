@@ -2,6 +2,8 @@ package com.stugram.app.data.remote
 
 import com.stugram.app.data.remote.model.BaseResponse
 import com.stugram.app.data.remote.model.ChatMessageModel
+import com.stugram.app.data.remote.model.ChatReplayEventsData
+import com.stugram.app.data.remote.model.ChatSummaryModel
 import com.stugram.app.data.remote.model.DirectConversationModel
 import com.stugram.app.data.remote.model.PaginatedResponse
 import com.stugram.app.data.remote.model.SendChatMessageRequest
@@ -38,6 +40,16 @@ interface ChatApi {
         @Query("limit") limit: Int
     ): Response<PaginatedResponse<DirectConversationModel>>
 
+    @GET("chats/summary")
+    suspend fun getSummary(): Response<BaseResponse<ChatSummaryModel>>
+
+    @GET("chats/events")
+    suspend fun getConversationEvents(
+        @Query("conversationId") conversationId: String,
+        @Query("after") after: Long,
+        @Query("limit") limit: Int
+    ): Response<BaseResponse<ChatReplayEventsData>>
+
     @GET("chats/conversations/{conversationId}/messages")
     suspend fun getConversationMessages(
         @Path("conversationId") conversationId: String,
@@ -62,7 +74,8 @@ interface ChatApi {
         @Path("conversationId") conversationId: String,
         @Part media: MultipartBody.Part,
         @Part("messageType") messageType: RequestBody,
-        @Part("replyToMessageId") replyToMessageId: RequestBody? = null
+        @Part("replyToMessageId") replyToMessageId: RequestBody? = null,
+        @Part("clientId") clientId: RequestBody? = null
     ): Response<BaseResponse<ChatMessageModel>>
 
     @PATCH("chats/messages/{messageId}/seen")
