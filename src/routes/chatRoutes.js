@@ -41,6 +41,13 @@ router.get("/summary", requireAuth, chatController.getSummary);
 router.get("/unread-count", requireAuth, chatController.getUnreadCount);
 router.get("/events", requireAuth, requireReplaySyncEnabled, chatController.getConversationEvents);
 router.get(
+  "/conversations/:conversationId/events",
+  requireAuth,
+  requireReplaySyncEnabled,
+  validate(conversationIdParamSchema),
+  chatController.getConversationEvents
+);
+router.get(
   "/conversations/:conversationId/search",
   requireAuth,
   validate(conversationSearchSchema),
@@ -69,10 +76,10 @@ router.post(
 router.post(
   "/conversations/:conversationId/messages/media",
   requireAuth,
-  requireMediaSendEnabled,
   messageSendLimiter,
   replyLimiter,
   uploadChatMedia,
+  requireMediaSendEnabled,
   validate(sendMediaMessageSchema),
   chatController.sendMediaMessage
 );

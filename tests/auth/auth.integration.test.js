@@ -2,6 +2,7 @@ const { setupIntegrationTestSuite } = require("../helpers/integration");
 const { authHeader, createUser } = require("../helpers/factories");
 const { env } = require("../../src/config/env");
 const PasswordResetToken = require("../../src/models/PasswordResetToken");
+const AuditLog = require("../../src/models/AuditLog");
 
 const { getClient } = setupIntegrationTestSuite();
 
@@ -91,6 +92,69 @@ describe("Auth integration", () => {
 
     expect(logoutResponse.statusCode).toBe(200);
     expect(logoutResponse.body.data.loggedOut).toBe(true);
+  });
+
+  it("allows refresh from a changed IP and records an audit log instead of revoking", async () => {
+    const client = getClient();
+    await createUser({
+      identity: "ipchange@example.com",
+      username: "ip_change_user",
+      fullName: "Ip Change User",
+      password: "Password123",
+    });
+
+    const loginResponse = await client
+      .post("/api/v1/auth/login")
+      .set("x-device-id", "device-ip-1")
+      .set("User-Agent", "StugramTest/1.0")
+      .set("X-Forwarded-For", "203.0.113.10")
+      .send({ identityOrUsername: "ip_change_user", password: "Password123" });
+
+    expect(loginResponse.statusCode).toBe(200);
+
+    // Same device + User-Agent, only the IP changes (e.g. wifi -> cellular).
+    const refreshResponse = await client
+      .post("/api/v1/auth/refresh-token")
+      .set("x-device-id", "device-ip-1")
+      .set("User-Agent", "StugramTest/1.0")
+      .set("X-Forwarded-For", "198.51.100.20")
+      .send({ refreshToken: loginResponse.body.data.refreshToken });
+
+    expect(refreshResponse.statusCode).toBe(200);
+    expect(refreshResponse.body.data.accessToken).toBeTruthy();
+    expect(refreshResponse.body.data.refreshToken).toBeTruthy();
+
+    const ipChangeLogs = await AuditLog.find({ action: "auth.refresh_ip_change" });
+    expect(ipChangeLogs.length).toBe(1);
+    expect(ipChangeLogs[0].details.oldIp).toBe("203.0.113.10");
+    expect(ipChangeLogs[0].details.newIp).toBe("198.51.100.20");
+  });
+
+  it("revokes the session on a changed User-Agent during refresh", async () => {
+    const client = getClient();
+    await createUser({
+      identity: "uachange@example.com",
+      username: "ua_change_user",
+      fullName: "Ua Change User",
+      password: "Password123",
+    });
+
+    const loginResponse = await client
+      .post("/api/v1/auth/login")
+      .set("x-device-id", "device-ua-1")
+      .set("User-Agent", "StugramTest/1.0")
+      .send({ identityOrUsername: "ua_change_user", password: "Password123" });
+
+    expect(loginResponse.statusCode).toBe(200);
+
+    const refreshResponse = await client
+      .post("/api/v1/auth/refresh-token")
+      .set("x-device-id", "device-ua-1")
+      .set("User-Agent", "TotallyDifferentAgent/9.9")
+      .send({ refreshToken: loginResponse.body.data.refreshToken });
+
+    expect(refreshResponse.statusCode).toBe(401);
+    expect(refreshResponse.body.message).toBe("Suspicious refresh token usage detected");
   });
 
   it("supports sessions, revoke specific session, forgot/reset password, and change password", async () => {

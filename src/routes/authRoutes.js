@@ -17,6 +17,7 @@ const {
   changePasswordSchema,
   sessionIdParamSchema,
   switchProfileSchema,
+  telegramLinkCodeParamSchema,
 } = require("../validators/authValidators");
 
 const router = express.Router();
@@ -36,5 +37,12 @@ router.get("/sessions", requireAuth, authController.listSessions);
 router.delete("/sessions/:sessionId", requireAuth, validate(sessionIdParamSchema), authController.revokeSession);
 router.post("/switch-profile", requireAuth, validate(switchProfileSchema), authController.switchProfile);
 router.post("/google", authLimiter, validate(googleLoginSchema), authController.googleLogin);
+router.post("/telegram/link-code", authLimiter, authController.createTelegramLinkCode);
+router.get(
+  "/telegram/link-status/:code",
+  authLimiter,
+  validate(telegramLinkCodeParamSchema),
+  authController.getTelegramLinkStatus
+);
 
 module.exports = router;

@@ -5,6 +5,7 @@ const Conversation = require("../models/Conversation");
 const GroupConversation = require("../models/GroupConversation");
 const User = require("../models/User");
 const { env } = require("../config/env");
+const { isSocketJoinConversationEnabled } = require("../config/featureFlags");
 const logger = require("../utils/logger");
 const { takeSocketToken } = require("./socketRateLimit");
 const { incrementCounter } = require("../services/chatMetricsService");
@@ -306,6 +307,15 @@ const registerChatSocket = (io) => {
 
     socket.on("conversation:join", async ({ conversationId }, ack) => {
       try {
+        if (!isSocketJoinConversationEnabled()) {
+          ack?.({
+            ok: false,
+            code: "FEATURE_SOCKET_JOIN_CONVERSATION_DISABLED",
+            message: "This feature is temporarily disabled.",
+            details: { feature: "socket_join_conversation" },
+          });
+          return;
+        }
         if (!(await takeSocketToken({ userId: socket.user.id, eventName: "conversation_join", limit: 20, windowMs: 60 * 1000 }))) {
           ack?.({ ok: false, message: "Too many join requests" });
           return;
@@ -320,6 +330,15 @@ const registerChatSocket = (io) => {
 
     socket.on("group_chat:join", async ({ groupId }, ack) => {
       try {
+        if (!isSocketJoinConversationEnabled()) {
+          ack?.({
+            ok: false,
+            code: "FEATURE_SOCKET_JOIN_CONVERSATION_DISABLED",
+            message: "This feature is temporarily disabled.",
+            details: { feature: "socket_join_conversation" },
+          });
+          return;
+        }
         if (!(await takeSocketToken({ userId: socket.user.id, eventName: "group_chat_join", limit: 20, windowMs: 60 * 1000 }))) {
           ack?.({ ok: false, message: "Too many join requests" });
           return;

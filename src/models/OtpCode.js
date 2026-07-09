@@ -15,7 +15,7 @@ const otpCodeSchema = new mongoose.Schema(
     },
     purpose: {
       type: String,
-      enum: ["register", "login"],
+      enum: ["register", "login", "forgot_password"],
       default: "register",
     },
     isVerified: {

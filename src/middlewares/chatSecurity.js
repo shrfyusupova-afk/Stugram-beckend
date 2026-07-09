@@ -1,5 +1,10 @@
-const ApiError = require("../utils/ApiError");
 const { env } = require("../config/env");
+const { requireFeatureEnabled } = require("./featureGate");
+const {
+  isChatReplayEnabled,
+  isGroupSendEnabled,
+  isMediaSendEnabled,
+} = require("../config/featureFlags");
 const { consumeRateLimit } = require("../services/redisSecurityService");
 
 const createChatLimiter = ({ keyPrefix, windowMs, max, message }) => async (req, res, next) => {
@@ -24,36 +29,27 @@ const createChatLimiter = ({ keyPrefix, windowMs, max, message }) => async (req,
   next();
 };
 
-const ensureFeatureEnabled = (enabled, message, statusCode = 503) => (req, _res, next) => {
-  if (!enabled()) {
-    return next(new ApiError(statusCode, message));
-  }
-  return next();
-};
+const requireReplaySyncEnabled = requireFeatureEnabled({
+  isEnabled: isChatReplayEnabled,
+  feature: "chat_replay",
+  errorCode: "FEATURE_CHAT_REPLAY_DISABLED",
+});
 
-const requireReplaySyncEnabled = ensureFeatureEnabled(
-  () => env.chatReplaySyncEnabled,
-  "Chat replay sync is temporarily unavailable."
-);
+const requireGroupSendEnabled = requireFeatureEnabled({
+  isEnabled: isGroupSendEnabled,
+  feature: "group_send",
+  errorCode: "FEATURE_GROUP_SEND_DISABLED",
+});
 
-const requireGroupSendEnabled = ensureFeatureEnabled(
-  () => env.chatGroupSendEnabled,
-  "Group chat sending is temporarily unavailable."
-);
-
-const requireMediaSendEnabled = (req, _res, next) => {
-  if (env.chatMediaSendEnabled) {
-    return next();
-  }
-
-  const messageType = String(req.body?.messageType || "").toLowerCase();
-  const isMediaAttempt = Boolean(req.file) || ["image", "video", "voice", "round_video", "file"].includes(messageType);
-  if (!isMediaAttempt) {
-    return next();
-  }
-
-  return next(new ApiError(503, "Media sending is temporarily unavailable."));
-};
+const requireMediaSendEnabled = requireFeatureEnabled({
+  isEnabled: isMediaSendEnabled,
+  feature: "media_send",
+  errorCode: "FEATURE_MEDIA_SEND_DISABLED",
+  isAttempt: (req) => {
+    const messageType = String(req.body?.messageType || "").toLowerCase();
+    return Boolean(req.file) || ["image", "video", "voice", "round_video", "file"].includes(messageType);
+  },
+});
 
 const messageSendLimiter = createChatLimiter({
   keyPrefix: "chat:message_send",

@@ -1,10 +1,13 @@
 const logger = require("../utils/logger");
 const { env } = require("../config/env");
+const { sendTelegramMessage } = require("./telegramService");
 
 const isEmailIdentity = (identity) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity);
 const isPhoneIdentity = (identity) => /^\+998\d{9}$/.test(identity);
+const isTelegramIdentity = (identity) => /^tg:\d+$/.test(identity);
 
 const getIdentityChannel = (identity) => {
+  if (isTelegramIdentity(identity)) return "telegram";
   if (isEmailIdentity(identity)) return "email";
   if (isPhoneIdentity(identity)) return "sms";
   return null;
@@ -20,6 +23,10 @@ const maskIdentity = (identity) => {
 
   if (isPhoneIdentity(identity)) {
     return `${identity.slice(0, 4)}***${identity.slice(-2)}`;
+  }
+
+  if (isTelegramIdentity(identity)) {
+    return `tg:***${identity.slice(-3)}`;
   }
 
   return "unknown";
@@ -292,11 +299,39 @@ const sendOtpEmail = async (identity, otp) => {
   return result;
 };
 
+// Telegram identities look like "tg:<chatId>" (see telegramService's linking
+// flow). This is a standalone transport independent of OTP_PROVIDER, since
+// that setting only governs the sms/email split.
+const sendOtpTelegram = async (identity, otp) => {
+  const chatId = identity.slice("tg:".length);
+
+  logDeliveryAttempt({ eventName: "otp_send_attempted", identity, channel: "telegram", provider: "telegram" });
+
+  try {
+    await sendTelegramMessage(chatId, buildOtpMessage(otp));
+  } catch (error) {
+    logDeliveryFailure({ eventName: "otp_send_failed", identity, channel: "telegram", provider: "telegram", error });
+    throw buildDeliveryError("Telegram OTP delivery failed", error);
+  }
+
+  logDeliverySuccess({ eventName: "otp_send_success", identity, channel: "telegram", provider: "telegram" });
+
+  return {
+    channel: "telegram",
+    provider: "telegram",
+    delivered: true,
+  };
+};
+
 const sendOtpForIdentity = async (identity, otp) => {
   const channel = getIdentityChannel(identity);
 
   if (!channel) {
     throw buildDeliveryError("OTP delivery failed", new Error("Unsupported OTP identity format"));
+  }
+
+  if (channel === "telegram") {
+    return sendOtpTelegram(identity, otp);
   }
 
   if (env.otpProvider === "sms" && channel !== "sms") {
@@ -317,11 +352,13 @@ const sendOtpForIdentity = async (identity, otp) => {
 module.exports = {
   isEmailIdentity,
   isPhoneIdentity,
+  isTelegramIdentity,
   getIdentityChannel,
   maskIdentity,
   buildDeliveryError,
   sendEmailThroughConfiguredProvider,
   sendOtpSms,
   sendOtpEmail,
+  sendOtpTelegram,
   sendOtpForIdentity,
 };

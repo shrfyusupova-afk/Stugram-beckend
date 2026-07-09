@@ -13,6 +13,15 @@ const parseBooleanEnv = (value, fallback = undefined) => {
   return fallback;
 };
 
+// CLIENT_URL is a comma-separated allowlist of browser origins. The wildcard
+// "*" is stripped out here so it can only ever act as a permissive dev flag,
+// never as a credentialed-CORS origin.
+const parseClientOrigins = (value) =>
+  String(value || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0 && origin !== "*");
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().default(5001),
@@ -30,6 +39,10 @@ const envSchema = z.object({
   JWT_ACCESS_EXPIRES_IN: z.string().default("15m"),
   JWT_REFRESH_EXPIRES_IN: z.string().default("30d"),
   GOOGLE_CLIENT_ID: z.string().optional(),
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  TELEGRAM_BOT_USERNAME: z.string().optional(),
+  TELEGRAM_WEBHOOK_SECRET: z.string().optional(),
+  TELEGRAM_CHANNELS_TEXT: z.string().optional(),
   FIREBASE_PROJECT_ID: z.string().optional(),
   FIREBASE_CLIENT_EMAIL: z.string().optional(),
   FIREBASE_PRIVATE_KEY: z.string().optional(),
@@ -78,7 +91,7 @@ const envSchema = z.object({
   QUEUE_ENABLED: z.coerce.boolean().default(true),
   WORKER_REQUIRED: z.coerce.boolean().default(false),
   RECOMMENDATION_WORKER_ENABLED: z.coerce.boolean().default(true),
-  RECOMMENDATION_MODE: z.enum(["weighted-cache", "db-direct"]).default("weighted-cache"),
+  RECOMMENDATION_MODE: z.enum(["disabled", "db-direct", "full", "weighted-cache"]).default("weighted-cache"),
   CACHE_MODE: z.enum(["enabled", "redis-optional", "disabled"]).default("enabled"),
   ENABLE_MAINTENANCE_CLEANUP_SCHEDULER: z.coerce.boolean().default(false),
   MAINTENANCE_CLEANUP_INTERVAL_MINUTES: z.coerce.number().default(60),
@@ -102,6 +115,8 @@ const envSchema = z.object({
 
 const normalizedEnv = {
   ...process.env,
+  CHAT_REPLAY_SYNC_ENABLED:
+    process.env.CHAT_REPLAY_SYNC_ENABLED ?? process.env.CHAT_REPLAY_ENABLED ?? "true",
   MONGODB_URI: process.env.MONGODB_URI || process.env.MONGO_URI,
   ENABLE_BOOTSTRAP_USER: process.env.ENABLE_BOOTSTRAP_USER === "true",
   REDIS_REQUIRED:
@@ -113,9 +128,13 @@ const normalizedEnv = {
   QUEUE_ENABLED: parseBooleanEnv(process.env.QUEUE_ENABLED, true),
   WORKER_REQUIRED: parseBooleanEnv(process.env.WORKER_REQUIRED, false),
   RECOMMENDATION_WORKER_ENABLED: parseBooleanEnv(process.env.RECOMMENDATION_WORKER_ENABLED, true),
-  RECOMMENDATION_MODE:
-    process.env.RECOMMENDATION_MODE ||
-    (parseBooleanEnv(process.env.QUEUE_ENABLED, true) === false ? "db-direct" : "weighted-cache"),
+  RECOMMENDATION_MODE: (() => {
+    const rawMode =
+      process.env.RECOMMENDATION_MODE ||
+      (parseBooleanEnv(process.env.QUEUE_ENABLED, true) === false ? "db-direct" : "weighted-cache");
+    if (rawMode === "full") return "weighted-cache";
+    return rawMode;
+  })(),
   ALLOW_MEMORY_DB_FALLBACK: process.env.ALLOW_MEMORY_DB_FALLBACK === "true",
 };
 
@@ -235,6 +254,13 @@ if (parsedEnv.NODE_ENV === "production") {
         : "Password reset email delivery requires RESEND_API_KEY and RESEND_FROM_EMAIL in production"
     );
   }
+
+  const productionOrigins = parseClientOrigins(parsedEnv.CLIENT_URL);
+  if (productionOrigins.length === 0) {
+    providerValidationErrors.push(
+      "CLIENT_URL must be an explicit comma-separated origin allowlist in production; wildcard '*' is not allowed because CORS runs with credentials"
+    );
+  }
 }
 
 if (providerValidationErrors.length) {
@@ -314,11 +340,18 @@ const env = {
   bootstrapUserFullName: parsedEnv.BOOTSTRAP_USER_FULL_NAME || null,
   bootstrapUserRole: parsedEnv.BOOTSTRAP_USER_ROLE || "user",
   clientUrl: parsedEnv.CLIENT_URL === "*" ? true : parsedEnv.CLIENT_URL,
+  clientOrigins: parseClientOrigins(parsedEnv.CLIENT_URL),
+  // Reflect any origin only in non-production when CLIENT_URL is left as "*".
+  allowAllOrigins: parsedEnv.NODE_ENV !== "production" && String(parsedEnv.CLIENT_URL).trim() === "*",
   jwtAccessSecret: parsedEnv.JWT_ACCESS_SECRET,
   jwtRefreshSecret: parsedEnv.JWT_REFRESH_SECRET,
   jwtAccessExpiresIn: parsedEnv.JWT_ACCESS_EXPIRES_IN,
   jwtRefreshExpiresIn: parsedEnv.JWT_REFRESH_EXPIRES_IN,
   googleClientId: parsedEnv.GOOGLE_CLIENT_ID || null,
+  telegramBotToken: parsedEnv.TELEGRAM_BOT_TOKEN || null,
+  telegramBotUsername: parsedEnv.TELEGRAM_BOT_USERNAME || null,
+  telegramWebhookSecret: parsedEnv.TELEGRAM_WEBHOOK_SECRET || null,
+  telegramChannelsText: parsedEnv.TELEGRAM_CHANNELS_TEXT || null,
   firebaseProjectId: parsedEnv.FIREBASE_PROJECT_ID || null,
   firebaseClientEmail: parsedEnv.FIREBASE_CLIENT_EMAIL || null,
   firebasePrivateKey: parsedEnv.FIREBASE_PRIVATE_KEY || null,
@@ -373,7 +406,7 @@ const env = {
   queueEnabled: parsedEnv.QUEUE_ENABLED,
   workerRequired: parsedEnv.WORKER_REQUIRED,
   recommendationWorkerEnabled: parsedEnv.RECOMMENDATION_WORKER_ENABLED,
-  recommendationMode: parsedEnv.RECOMMENDATION_MODE,
+  recommendationMode: parsedEnv.RECOMMENDATION_MODE === "full" ? "weighted-cache" : parsedEnv.RECOMMENDATION_MODE,
   cacheMode: parsedEnv.CACHE_MODE,
   enableMaintenanceCleanupScheduler: parsedEnv.ENABLE_MAINTENANCE_CLEANUP_SCHEDULER,
   maintenanceCleanupIntervalMinutes: parsedEnv.MAINTENANCE_CLEANUP_INTERVAL_MINUTES,
@@ -392,6 +425,7 @@ const env = {
   chatMediaSendEnabled: parsedEnv.CHAT_MEDIA_SEND_ENABLED,
   chatReplaySyncEnabled: parsedEnv.CHAT_REPLAY_SYNC_ENABLED,
   chatRealtimeEnabled: parsedEnv.CHAT_REALTIME_ENABLED,
+  socketJoinConversationEnabled: parseBooleanEnv(process.env.SOCKET_JOIN_CONVERSATION_ENABLED, true) !== false,
   chatRateLimitStrictMode: parsedEnv.CHAT_RATE_LIMIT_STRICT_MODE,
 };
 

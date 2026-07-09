@@ -183,12 +183,19 @@ const messageSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    serverSequence: {
+      type: Number,
+      default: 0,
+      min: 0,
+      index: true,
+    },
   },
   { timestamps: true }
 );
 
 messageSchema.index({ conversation: 1, createdAt: -1 });
 messageSchema.index({ conversation: 1, deletedFor: 1, createdAt: -1 });
+messageSchema.index({ conversation: 1, serverSequence: 1 });
 messageSchema.index({ "reactions.user": 1 });
 messageSchema.index(
   { conversation: 1, sender: 1, clientId: 1 },

@@ -168,13 +168,13 @@ const checkUsernameAvailability = async (username) => {
 const updateProfile = async (currentUserId, payload) => {
   const user = await User.findById(currentUserId);
   if (!user) {
-    throw new ApiError(404, "User not found");
+    throw new ApiError(404, "Profile not found", { code: "PROFILE_NOT_FOUND" });
   }
 
   if (payload.username && payload.username.toLowerCase() !== user.username) {
     const exists = await User.findOne({ username: payload.username.toLowerCase() });
     if (exists) {
-      throw new ApiError(409, "Username already taken");
+      throw new ApiError(409, "Username already taken", { code: "USERNAME_ALREADY_TAKEN" });
     }
     user.username = payload.username.toLowerCase();
   }

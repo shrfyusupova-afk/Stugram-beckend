@@ -38,6 +38,13 @@ const router = express.Router();
 router.post("/", requireAuth, uploadGroupAvatar, validate(createGroupChatSchema), groupChatController.createGroupChat);
 router.get("/", requireAuth, validate(groupChatsListSchema), groupChatController.getGroupChats);
 router.get("/events", requireAuth, requireReplaySyncEnabled, groupChatController.getGroupEvents);
+router.get(
+  "/:groupId/events",
+  requireAuth,
+  requireReplaySyncEnabled,
+  validate(groupIdParamSchema),
+  groupChatController.getGroupEvents
+);
 router.patch("/:groupId", requireAuth, uploadGroupAvatar, validate(updateGroupChatSchema), groupChatController.updateGroupChat);
 router.get("/:groupId", requireAuth, validate(groupIdParamSchema), groupChatController.getGroupChatDetail);
 router.get("/:groupId/members", requireAuth, validate(groupMembersListSchema), groupChatController.getGroupMembers);
@@ -53,10 +60,10 @@ router.post(
   "/:groupId/messages",
   requireAuth,
   requireGroupSendEnabled,
-  requireMediaSendEnabled,
   messageSendLimiter,
   replyLimiter,
   uploadChatMedia,
+  requireMediaSendEnabled,
   validate(sendGroupMessageSchema),
   groupChatController.sendGroupMessage
 );

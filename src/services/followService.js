@@ -24,6 +24,9 @@ const followUser = async (currentUserId, targetUserId) => {
   if (currentUserId.toString() === targetUserId) throw new ApiError(400, "You cannot follow yourself");
   const targetUser = await User.findById(targetUserId);
   if (!targetUser) throw new ApiError(404, "User not found");
+  if (await areUsersBlocked(currentUserId, targetUserId)) {
+    throw new ApiError(403, "Follow forbidden for blocked users");
+  }
 
   const existingFollow = await Follow.findOne({ follower: currentUserId, following: targetUserId });
   if (existingFollow) throw new ApiError(409, "Already following user");

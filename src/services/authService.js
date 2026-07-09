@@ -4,9 +4,9 @@ const { OAuth2Client } = require("google-auth-library");
 
 const ApiError = require("../utils/ApiError");
 const OtpCode = require("../models/OtpCode");
-const PasswordResetToken = require("../models/PasswordResetToken");
 const Session = require("../models/Session");
 const User = require("../models/User");
+const PasswordResetToken = require("../models/PasswordResetToken");
 const {
   hashOtp,
   hashToken,
@@ -19,17 +19,38 @@ const { getOrCreateSettings } = require("./settingsService");
 const { createAuditLog } = require("./auditLogService");
 const logger = require("../utils/logger");
 const { denylistToken, isTokenDenied } = require("./redisSecurityService");
-const { sendOtpForIdentity, maskIdentity } = require("./otpDeliveryService");
+const { sendOtpForIdentity, maskIdentity, getIdentityChannel } = require("./otpDeliveryService");
 const { sendPasswordResetEmail } = require("./passwordResetDeliveryService");
 
 const googleClient = env.googleClientId ? new OAuth2Client(env.googleClientId) : null;
-const PASSWORD_RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
 const shouldExposeNonProductionSecrets = () => env.nodeEnv !== "production";
 
 const generateOtp = () => String(Math.floor(100000 + Math.random() * 900000));
-const buildPasswordResetToken = () => crypto.randomBytes(32).toString("hex");
 
 const normalizeIdentity = (identity) => String(identity || "").trim().toLowerCase();
+
+const IDENTITY_FORMAT_REGEX = /(^\+998\d{9}$)|(^[^\s@]+@[^\s@]+\.[^\s@]+$)|(^tg:\d+$)/;
+
+// The forgot-password flow lets users type their username instead of the raw
+// identity (which for Telegram accounts is an internal "tg:<chatId>" value
+// they never see). Resolve it to the stored identity; other purposes still
+// require a real identity format.
+const resolveOtpIdentity = async (identity, purpose) => {
+  const normalized = normalizeIdentity(identity);
+  if (IDENTITY_FORMAT_REGEX.test(normalized)) {
+    return normalized;
+  }
+
+  if (purpose === "forgot_password") {
+    const user = await User.findOne({ username: normalized }).select("identity");
+    if (user?.identity) {
+      return user.identity;
+    }
+    throw new ApiError(404, "Bunday foydalanuvchi topilmadi");
+  }
+
+  throw new ApiError(400, "Invalid identity");
+};
 
 const buildOtpSendMeta = (meta = {}) => ({
   ipAddress: meta.ipAddress || null,
@@ -37,11 +58,31 @@ const buildOtpSendMeta = (meta = {}) => ({
   deviceId: meta.deviceId || null,
 });
 
-const buildForgotPasswordResponse = (identity, expiresAt = null, resetToken = undefined) => ({
+const buildForgotPasswordResponse = (identity, expiresAt = null, otp = undefined, resetToken = undefined) => ({
   identity,
   expiresAt,
+  otp,
   resetToken,
 });
+
+const PASSWORD_RESET_TOKEN_EXPIRES_MINUTES = 15;
+
+const issuePasswordResetToken = async ({ user, identity, meta = {} }) => {
+  const rawToken = crypto.randomBytes(32).toString("hex");
+  const tokenHash = hashToken(rawToken);
+  const expiresAt = new Date(Date.now() + PASSWORD_RESET_TOKEN_EXPIRES_MINUTES * 60 * 1000);
+
+  await PasswordResetToken.create({
+    user: user._id,
+    identity,
+    tokenHash,
+    expiresAt,
+    requestedByIp: meta.ipAddress || null,
+    userAgent: meta.userAgent || null,
+  });
+
+  return { rawToken, tokenHash, expiresAt };
+};
 
 const enforceOtpSendLimits = async (identity, purpose) => {
   const cooldownStartedAt = new Date(Date.now() - env.otpResendCooldownSeconds * 1000);
@@ -120,7 +161,7 @@ const sanitizeUser = (user) => ({
 });
 
 const sendOtp = async ({ identity, purpose }, meta = {}) => {
-  const normalizedIdentity = normalizeIdentity(identity);
+  const normalizedIdentity = await resolveOtpIdentity(identity, purpose);
   const safeMeta = buildOtpSendMeta(meta);
 
   if (purpose === "register") {
@@ -170,20 +211,26 @@ const sendOtp = async ({ identity, purpose }, meta = {}) => {
   }
 
   return {
-    identity: normalizedIdentity,
+    // For username-based forgot-password requests, echo back what the caller
+    // sent (they keep using it in verify/reset) instead of leaking the
+    // resolved internal identity; expose only a masked destination.
+    identity: purpose === "forgot_password" ? normalizeIdentity(identity) : normalizedIdentity,
     purpose,
     expiresAt,
+    channel: getIdentityChannel(normalizedIdentity),
+    maskedDestination: maskIdentity(normalizedIdentity),
     otp: shouldExposeNonProductionSecrets() ? otp : undefined,
   };
 };
 
 const verifyOtp = async ({ identity, otp, purpose }) => {
-  const record = await OtpCode.findOne({ identity, purpose }).sort({ createdAt: -1 });
+  const normalizedIdentity = await resolveOtpIdentity(identity, purpose);
+  const record = await OtpCode.findOne({ identity: normalizedIdentity, purpose }).sort({ createdAt: -1 });
   if (!record || record.expiresAt < new Date()) {
     throw new ApiError(400, "OTP expired or not found");
   }
 
-  if (record.codeHash !== hashOtp(identity, otp)) {
+  if (record.codeHash !== hashOtp(normalizedIdentity, otp)) {
     throw new ApiError(400, "Invalid OTP");
   }
 
@@ -443,7 +490,6 @@ const login = async ({ identityOrUsername, password }, meta = {}) => {
 
 const forgotPassword = async (identity, meta = {}) => {
   const normalizedIdentity = normalizeIdentity(identity);
-  const fallbackExpiresAt = new Date(Date.now() + PASSWORD_RESET_TOKEN_TTL_MS);
   const user = await User.findOne({ identity: normalizedIdentity }).select("_id identity");
 
   if (!user) {
@@ -456,50 +502,31 @@ const forgotPassword = async (identity, meta = {}) => {
       details: { identity: normalizedIdentity, reason: "user_not_found" },
     });
 
-    return buildForgotPasswordResponse(normalizedIdentity, fallbackExpiresAt, undefined);
+    return buildForgotPasswordResponse(normalizedIdentity, null, undefined);
   }
-
-  await PasswordResetToken.deleteMany({ user: user.id, usedAt: null });
-
-  const rawToken = buildPasswordResetToken();
-  const expiresAt = new Date(Date.now() + PASSWORD_RESET_TOKEN_TTL_MS);
-
-  await PasswordResetToken.create({
-    user: user.id,
+  const { rawToken, expiresAt } = await issuePasswordResetToken({
+    user,
     identity: normalizedIdentity,
-    tokenHash: hashToken(rawToken),
-    expiresAt,
-    requestedByIp: meta.ipAddress || null,
-    userAgent: meta.userAgent || null,
+    meta,
   });
 
   try {
     await sendPasswordResetEmail(normalizedIdentity, rawToken, { expiresAt });
   } catch (error) {
     logger.error("Password reset delivery failed", {
-      identity: normalizedIdentity,
+      identity: maskIdentity(normalizedIdentity),
       ipAddress: meta.ipAddress || null,
       userAgent: meta.userAgent || null,
       message: error.message,
     });
 
-    await createAuditLog({
-      actor: user.id,
-      action: "auth.forgot_password_delivery",
-      category: "auth",
-      status: "failure",
-      targetUser: user.id,
-      ipAddress: meta.ipAddress || null,
-      userAgent: meta.userAgent || null,
-      details: { reason: "delivery_failed" },
-    });
-
-    if (shouldExposeNonProductionSecrets()) {
-      return buildForgotPasswordResponse(normalizedIdentity, expiresAt, rawToken);
+    if (env.nodeEnv === "production") {
+      await PasswordResetToken.deleteMany({
+        identity: normalizedIdentity,
+        tokenHash: hashToken(rawToken),
+      });
+      return buildForgotPasswordResponse(normalizedIdentity, null, undefined);
     }
-
-    await PasswordResetToken.deleteMany({ user: user.id, tokenHash: hashToken(rawToken), usedAt: null });
-    return buildForgotPasswordResponse(normalizedIdentity, fallbackExpiresAt, undefined);
   }
 
   await createAuditLog({
@@ -512,60 +539,141 @@ const forgotPassword = async (identity, meta = {}) => {
     userAgent: meta.userAgent || null,
   });
 
-  return buildForgotPasswordResponse(normalizedIdentity, expiresAt, shouldExposeNonProductionSecrets() ? rawToken : undefined);
+  return buildForgotPasswordResponse(
+    normalizedIdentity,
+    expiresAt,
+    undefined,
+    shouldExposeNonProductionSecrets() ? rawToken : undefined
+  );
 };
 
-const resetPassword = async ({ token, password }, meta = {}) => {
-  const tokenHash = hashToken(token);
-  const resetRecord = await PasswordResetToken.findOne({
-    tokenHash,
-    usedAt: null,
-  }).populate("user");
+const resetPassword = async (payload, meta = {}) => {
+  const { token, identity, otp, password, confirmPassword } = payload;
+  if (token) {
+    const tokenHash = hashToken(payload.token);
+    const resetRecord = await PasswordResetToken.findOne({
+      tokenHash,
+      usedAt: null,
+      expiresAt: { $gt: new Date() },
+    }).sort({ createdAt: -1 });
 
-  if (!resetRecord || resetRecord.expiresAt < new Date() || !resetRecord.user) {
+    if (!resetRecord) {
+      throw new ApiError(400, "Invalid or expired reset token");
+    }
+
+    const user = await User.findById(resetRecord.user).select("_id accountId passwordHash");
+    if (!user) {
+      throw new ApiError(400, "Invalid or expired reset token");
+    }
+
+    const nextPasswordHash = await bcrypt.hash(payload.password, 12);
+    const now = new Date();
+    user.passwordHash = nextPasswordHash;
+    user.tokenInvalidBefore = now;
+    user.lastLoginAt = null;
+    await user.save();
+
+    if (user.accountId) {
+      await Account.findByIdAndUpdate(user.accountId, {
+        passwordHash: nextPasswordHash,
+        tokenInvalidBefore: now,
+      });
+    }
+
+    await Session.updateMany(
+      { user: user.id, isRevoked: false },
+      { isRevoked: true, revokedReason: "password_reset" }
+    );
+    resetRecord.usedAt = now;
+    await resetRecord.save();
+    await PasswordResetToken.deleteMany({
+      identity: resetRecord.identity,
+      usedAt: null,
+      _id: { $ne: resetRecord._id },
+    });
+
+    await createAuditLog({
+      actor: user.id,
+      action: "auth.reset_password",
+      category: "auth",
+      status: "success",
+      targetUser: user.id,
+      ipAddress: meta.ipAddress || null,
+      userAgent: meta.userAgent || null,
+      details: { mode: "token" },
+    });
+
+    return { reset: true };
+  }
+
+  const normalizedIdentity = await resolveOtpIdentity(identity, "forgot_password");
+  const user = await User.findOne({ identity: normalizedIdentity }).select("_id accountId passwordHash");
+  if (!user) {
     await createAuditLog({
       action: "auth.reset_password",
       category: "auth",
       status: "failure",
       ipAddress: meta.ipAddress || null,
       userAgent: meta.userAgent || null,
-      details: { reason: "invalid_or_expired_reset_token" },
+      details: { reason: "user_not_found" },
     });
-    throw new ApiError(400, "Reset token is invalid or expired");
+    throw new ApiError(400, "Invalid OTP or identity");
+  }
+
+  if (password !== confirmPassword) {
+    throw new ApiError(400, "Passwords do not match");
+  }
+
+  const otpRecord = await OtpCode.findOne({ identity: normalizedIdentity, purpose: "forgot_password" })
+    .sort({ createdAt: -1 })
+    .select("codeHash expiresAt isVerified");
+
+  if (
+    !otpRecord ||
+    otpRecord.expiresAt < new Date() ||
+    !otpRecord.isVerified ||
+    otpRecord.codeHash !== hashOtp(normalizedIdentity, otp)
+  ) {
+    await createAuditLog({
+      actor: user.id,
+      action: "auth.reset_password",
+      category: "auth",
+      status: "failure",
+      targetUser: user.id,
+      ipAddress: meta.ipAddress || null,
+      userAgent: meta.userAgent || null,
+      details: { reason: "invalid_or_expired_otp" },
+    });
+    throw new ApiError(400, "Invalid or expired OTP");
   }
 
   const nextPasswordHash = await bcrypt.hash(password, 12);
-  resetRecord.user.passwordHash = nextPasswordHash;
   const now = new Date();
-  resetRecord.user.tokenInvalidBefore = now;
-  resetRecord.user.lastLoginAt = null;
-  await resetRecord.user.save();
+  user.passwordHash = nextPasswordHash;
+  user.tokenInvalidBefore = now;
+  user.lastLoginAt = null;
+  await user.save();
 
   // Keep the account-scoped canonical password in sync with the profile hash.
-  if (resetRecord.user.accountId) {
-    await Account.findByIdAndUpdate(resetRecord.user.accountId, {
+  if (user.accountId) {
+    await Account.findByIdAndUpdate(user.accountId, {
       passwordHash: nextPasswordHash,
       tokenInvalidBefore: now,
     });
   }
 
-  resetRecord.usedAt = new Date();
-  await resetRecord.save();
   await Session.updateMany(
-    { user: resetRecord.user.id, isRevoked: false },
+    { user: user.id, isRevoked: false },
     { isRevoked: true, revokedReason: "password_reset" }
   );
-  await PasswordResetToken.updateMany(
-    { user: resetRecord.user.id, usedAt: null, _id: { $ne: resetRecord._id } },
-    { usedAt: new Date() }
-  );
+  await OtpCode.deleteMany({ identity: normalizedIdentity, purpose: "forgot_password" });
 
   await createAuditLog({
-    actor: resetRecord.user.id,
+    actor: user.id,
     action: "auth.reset_password",
     category: "auth",
     status: "success",
-    targetUser: resetRecord.user.id,
+    targetUser: user.id,
     ipAddress: meta.ipAddress || null,
     userAgent: meta.userAgent || null,
   });
@@ -799,10 +907,16 @@ const refreshAuthToken = async (refreshToken, meta = {}) => {
   session.isRevoked = true;
   session.lastUsedAt = new Date();
   session.revokedReason = "rotated";
+  // IP mismatch is intentionally NOT a revoke trigger: mobile clients change IP
+  // on every wifi<->cellular switch, so revoking on IP change would log
+  // legitimate users out. Device and User-Agent mismatches remain hard triggers.
   const isSuspiciousRefresh =
     Boolean(session.deviceId && meta.deviceId && session.deviceId !== meta.deviceId) ||
-    Boolean(session.userAgent && meta.userAgent && session.userAgent !== meta.userAgent) ||
-    Boolean(session.ipAddress && meta.ipAddress && session.ipAddress !== meta.ipAddress);
+    Boolean(session.userAgent && meta.userAgent && session.userAgent !== meta.userAgent);
+
+  const isIpChanged = Boolean(
+    session.ipAddress && meta.ipAddress && session.ipAddress !== meta.ipAddress
+  );
 
   if (isSuspiciousRefresh) {
     session.isCompromised = true;
@@ -824,6 +938,28 @@ const refreshAuthToken = async (refreshToken, meta = {}) => {
       details: { familyId: session.familyId },
     });
     throw new ApiError(401, "Suspicious refresh token usage detected");
+  }
+
+  if (isIpChanged) {
+    // Keep the security signal without punishing the user for a network switch.
+    await createAuditLog({
+      actor: resolved.profileId,
+      action: "auth.refresh_ip_change",
+      category: "security",
+      status: "warning",
+      targetUser: resolved.profileId,
+      sessionId: session.sessionId,
+      ipAddress: meta.ipAddress || null,
+      userAgent: meta.userAgent || null,
+      details: { oldIp: session.ipAddress || null, newIp: meta.ipAddress || null },
+    });
+    logger.warn("auth.refresh_ip_change", {
+      userId: String(resolved.profileId),
+      sessionId: session.sessionId,
+      oldIp: session.ipAddress || null,
+      newIp: meta.ipAddress || null,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   await session.save();

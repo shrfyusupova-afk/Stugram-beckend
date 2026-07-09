@@ -183,12 +183,19 @@ const groupMessageSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    serverSequence: {
+      type: Number,
+      default: 0,
+      min: 0,
+      index: true,
+    },
   },
   { timestamps: true }
 );
 
 groupMessageSchema.index({ groupConversation: 1, createdAt: -1 });
 groupMessageSchema.index({ groupConversation: 1, deletedFor: 1, createdAt: -1 });
+groupMessageSchema.index({ groupConversation: 1, serverSequence: 1 });
 groupMessageSchema.index(
   { groupConversation: 1, sender: 1, clientId: 1 },
   { unique: true, partialFilterExpression: { clientId: { $type: "string" } } }

@@ -141,7 +141,8 @@ const searchGroupMessages = catchAsync(async (req, res) => {
 });
 
 const getGroupEvents = catchAsync(async (req, res) => {
-  const result = await groupChatService.getGroupEvents(req.user.id, req.query.groupId, req.query);
+  const groupId = req.params.groupId || req.query.groupId;
+  const result = await groupChatService.getGroupEvents(req.user.id, groupId, req.query);
   sendResponse(res, {
     message: "Group events fetched successfully",
     data: result,

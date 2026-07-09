@@ -39,6 +39,41 @@ const structuredPostShare = JSON.stringify({
 });
 
 describe("Chat integration", () => {
+  it("returns requestId for chat success and error envelopes", async () => {
+    const client = getClient();
+    const { user: firstUser, accessToken: firstToken } = await createAuthenticatedUser({
+      identity: "direct-requestid-one@example.com",
+      username: "direct_requestid_one",
+    });
+    const { user: secondUser } = await createAuthenticatedUser({
+      identity: "direct-requestid-two@example.com",
+      username: "direct_requestid_two",
+    });
+
+    const conversationResponse = await client
+      .post("/api/v1/chats/conversations")
+      .set(authHeader(firstToken))
+      .send({ participantId: secondUser._id.toString() });
+    const conversationId = conversationResponse.body.data._id;
+
+    const successResponse = await client
+      .post(`/api/v1/chats/conversations/${conversationId}/messages`)
+      .set(authHeader(firstToken))
+      .send({ text: "request id check", clientId: "direct-requestid-check-001" });
+
+    expect(successResponse.statusCode).toBe(201);
+    expect(successResponse.headers["x-request-id"]).toBeTruthy();
+    expect(successResponse.body.meta.requestId).toBeTruthy();
+
+    const unauthorizedResponse = await client
+      .post(`/api/v1/chats/conversations/${conversationId}/messages`)
+      .send({ text: "unauthorized" });
+
+    expect(unauthorizedResponse.statusCode).toBe(401);
+    expect(unauthorizedResponse.headers["x-request-id"]).toBeTruthy();
+    expect(unauthorizedResponse.body.meta.requestId).toBeTruthy();
+  });
+
   it("supports direct conversations, messages, pagination, and replies", async () => {
     const client = getClient();
     const { user: firstUser, accessToken: firstToken } = await createAuthenticatedUser({

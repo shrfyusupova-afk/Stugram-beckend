@@ -8,7 +8,9 @@ const { env } = require("./config/env");
 const { getDatabaseStatus, isPrimaryDatabaseReady, isMemoryFallbackReady } = require("./config/db");
 const { getRedisStatus, isRedisReady } = require("./config/redis");
 const { apiLimiter } = require("./middlewares/rateLimiter");
-const { assignRequestContext, logRequestCompletion } = require("./middlewares/observability");
+const { assignRequestId } = require("./middlewares/requestId");
+const { attachResponseMeta } = require("./middlewares/responseMeta");
+const { logRequestCompletion } = require("./middlewares/observability");
 const { notFoundHandler, errorHandler } = require("./middlewares/errorHandler");
 const routes = require("./routes");
 const { getFirebaseStatus } = require("./config/firebaseAdmin");
@@ -18,9 +20,22 @@ const { renderPrometheusMetrics, getMetricsSnapshot } = require("./services/chat
 
 const app = express();
 
-// Production deploys behind Render/proxies must trust exactly one proxy hop so
-// req.ip reflects X-Forwarded-For before any global rate limiter is evaluated.
-app.set("trust proxy", 1);
+const resolveTrustProxySetting = () => {
+  const rawValue = process.env.TRUST_PROXY;
+  if (rawValue == null || rawValue === "") {
+    return 1;
+  }
+
+  const normalized = String(rawValue).trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  if (/^\d+$/.test(normalized)) return Number(normalized);
+  return rawValue;
+};
+
+// Production deploys behind Render/proxies must trust proxy headers so req.ip
+// reflects X-Forwarded-For before any global rate limiter is evaluated.
+app.set("trust proxy", resolveTrustProxySetting());
 
 const isClosedAlphaNoWorkerMode = () =>
   env.recommendationMode === "db-direct" && (!env.queueEnabled || !env.recommendationWorkerEnabled);
@@ -45,8 +60,9 @@ const buildRuntimeMode = (redis, queueHealth) => ({
 const buildChatControls = () => ({
   groupSendEnabled: env.chatGroupSendEnabled,
   mediaSendEnabled: env.chatMediaSendEnabled,
-  replaySyncEnabled: env.chatReplaySyncEnabled,
+  replayEnabled: env.chatReplaySyncEnabled,
   realtimeEnabled: env.chatRealtimeEnabled,
+  socketJoinConversationEnabled: env.socketJoinConversationEnabled,
   rateLimitStrictMode: env.chatRateLimitStrictMode,
 });
 
@@ -96,20 +112,44 @@ const buildPublicHealthData = ({ database, redis, queueHealth, pushStatus }) => 
   cloudinaryConfigured: isCloudinaryConfigured(),
 });
 
-app.use(
-  cors({
-    origin: env.clientUrl,
-    credentials: true,
-  })
-);
+// Credentialed CORS cannot use a wildcard origin. Non-browser clients (the
+// Android app, curl, server-to-server) send no Origin header and are always
+// allowed; browser origins must match the CLIENT_URL allowlist. In development
+// only, CLIENT_URL="*" reflects any origin for convenience.
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (env.allowAllOrigins) return callback(null, true);
+    if (env.clientOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`Origin ${origin} is not allowed by CORS`));
+  },
+  credentials: true,
+};
+app.use(cors(corsOptions));
 app.use(helmet());
-app.use(assignRequestContext);
+app.use(assignRequestId);
+app.use(attachResponseMeta);
 app.use(apiLimiter);
 app.use(morgan(env.nodeEnv === "production" ? "combined" : "dev"));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(logRequestCompletion);
+
+app.head("/", (_req, res) => {
+  res.sendStatus(200);
+});
+
+app.get("/", (_req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "Stugram backend is running",
+    data: {
+      environment: env.nodeEnv,
+    },
+    meta: null,
+  });
+});
 
 app.get("/health", (req, res) => {
   Promise.all([Promise.resolve(getDatabaseStatus()), Promise.resolve(getRedisStatus()), getQueueHealthSnapshot(), Promise.resolve(getFirebaseStatus())]).then(

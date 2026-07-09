@@ -1,6 +1,7 @@
 const { sendResponse } = require("../utils/apiResponse");
 const catchAsync = require("../utils/catchAsync");
 const authService = require("../services/authService");
+const telegramService = require("../services/telegramService");
 
 const getRequestMeta = (req) => ({
   userAgent: req.headers["user-agent"],
@@ -85,6 +86,16 @@ const switchProfile = catchAsync(async (req, res) => {
   sendResponse(res, { statusCode: 200, message: "Profile switched successfully", data: result });
 });
 
+const createTelegramLinkCode = catchAsync(async (req, res) => {
+  const result = await telegramService.createLinkCode();
+  sendResponse(res, { statusCode: 200, message: "Telegram link code created", data: result });
+});
+
+const getTelegramLinkStatus = catchAsync(async (req, res) => {
+  const result = await telegramService.getLinkStatus(req.params.code);
+  sendResponse(res, { statusCode: 200, message: "Telegram link status fetched", data: result });
+});
+
 module.exports = {
   sendOtp,
   verifyOtp,
@@ -101,4 +112,6 @@ module.exports = {
   revokeSession,
   googleLogin,
   switchProfile,
+  createTelegramLinkCode,
+  getTelegramLinkStatus,
 };

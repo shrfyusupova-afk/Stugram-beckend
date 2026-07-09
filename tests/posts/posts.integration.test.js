@@ -10,6 +10,48 @@ const {
 const { getClient } = setupIntegrationTestSuite();
 
 describe("Posts and engagement integration", () => {
+  it("denies unauthenticated post creation", async () => {
+    const client = getClient();
+    const response = await client.post("/api/v1/posts").field("caption", "No auth");
+    expect(response.statusCode).toBe(401);
+    expect(response.body.meta.requestId).toBeTruthy();
+  });
+
+  it("creates a text-only post when caption is provided", async () => {
+    const client = getClient();
+    const { accessToken } = await createAuthenticatedUser({
+      identity: "text-only@example.com",
+      username: "text_only_author",
+    });
+
+    const response = await client
+      .post("/api/v1/posts")
+      .set(authHeader(accessToken))
+      .field("caption", "Text only launch post");
+
+    expect(response.statusCode).toBe(201);
+    expect(response.body.data.caption).toBe("Text only launch post");
+    expect(response.body.data.media).toEqual([]);
+    expect(response.body.meta.requestId).toBeTruthy();
+  });
+
+  it("rejects empty post without caption and media", async () => {
+    const client = getClient();
+    const { accessToken } = await createAuthenticatedUser({
+      identity: "empty-post@example.com",
+      username: "empty_post_author",
+    });
+
+    const response = await client
+      .post("/api/v1/posts")
+      .set(authHeader(accessToken))
+      .field("caption", "   ");
+
+    expect(response.statusCode).toBe(400);
+    expect(response.body.error.code).toBe("POST_VALIDATION_FAILED");
+    expect(response.body.meta.requestId).toBeTruthy();
+  });
+
   it("creates a post, likes it, comments on it, and deletes the comment", async () => {
     const client = getClient();
     const { accessToken, user } = await createAuthenticatedUser({

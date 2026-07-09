@@ -21,6 +21,8 @@ const getModels = () => ({
   StoryComment: require("../../src/models/StoryComment"),
   StoryLike: require("../../src/models/StoryLike"),
   Follow: require("../../src/models/Follow"),
+  FollowRequest: require("../../src/models/FollowRequest"),
+  Block: require("../../src/models/Block"),
   Conversation: require("../../src/models/Conversation"),
   Message: require("../../src/models/Message"),
   GroupConversation: require("../../src/models/GroupConversation"),

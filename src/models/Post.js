@@ -23,7 +23,7 @@ const postSchema = new mongoose.Schema(
     },
     media: {
       type: [mediaSchema],
-      validate: [(value) => value.length > 0, "At least one media item is required"],
+      default: [],
     },
     caption: {
       type: String,

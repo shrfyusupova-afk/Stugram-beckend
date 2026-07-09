@@ -157,7 +157,8 @@ const searchConversationMessages = catchAsync(async (req, res) => {
 });
 
 const getConversationEvents = catchAsync(async (req, res) => {
-  const result = await chatService.getConversationEvents(req.user.id, req.query.conversationId, req.query);
+  const conversationId = req.params.conversationId || req.query.conversationId;
+  const result = await chatService.getConversationEvents(req.user.id, conversationId, req.query);
   sendResponse(res, {
     message: "Conversation events fetched successfully",
     data: result,

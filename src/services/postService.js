@@ -56,17 +56,19 @@ const mapPostPreview = (post) => ({
 });
 
 const createPost = async (userId, payload, files) => {
-  if (!files || files.length === 0) {
-    throw new ApiError(400, "At least one media file is required");
+  const normalizedCaption = (payload.caption || "").trim();
+  const hasMedia = Boolean(files && files.length > 0);
+  if (!hasMedia && !normalizedCaption) {
+    throw new ApiError(400, "Caption or media is required", { code: "POST_VALIDATION_FAILED" });
   }
 
-  const media = await mapMediaFiles(files, "stugram/posts");
+  const media = hasMedia ? await mapMediaFiles(files, "stugram/posts") : [];
   let post = null;
   try {
     post = await Post.create({
       author: userId,
       media,
-      caption: payload.caption || "",
+      caption: normalizedCaption,
       hashtags: normalizeHashtags(payload.hashtags || []),
       location: payload.location || "",
     });
@@ -181,6 +183,7 @@ const getSinglePost = async (viewerId, postId) => {
 const getUserPosts = async (viewerId, username, query) => {
   const owner = await User.findOne({ username: username.toLowerCase() });
   if (!owner) throw new ApiError(404, "User not found");
+  if (owner.isSuspended) throw new ApiError(404, "User not found");
   const canView = await canViewUserContent(viewerId, owner);
   if (!canView) throw new ApiError(403, "This profile is private");
 
@@ -217,14 +220,15 @@ const getFeed = async (userId, query) => {
     (id) => !blockedIds.has(id)
   );
 
+  const feedFilter = { author: { $in: authorIds }, _id: { $nin: hiddenPostIds }, isHiddenByAdmin: { $ne: true } };
   const [items, total] = await Promise.all([
-    Post.find({ author: { $in: authorIds }, _id: { $nin: hiddenPostIds }, isHiddenByAdmin: { $ne: true } })
+    Post.find(feedFilter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .populate("author", "username fullName avatar")
       .lean(),
-    Post.countDocuments({ author: { $in: authorIds }, _id: { $nin: hiddenPostIds }, isHiddenByAdmin: { $ne: true } }),
+    Post.countDocuments(feedFilter),
   ]);
 
   return { items, meta: buildPaginationMeta({ page, limit, total }) };

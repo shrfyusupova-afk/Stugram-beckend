@@ -2,6 +2,7 @@ const express = require("express");
 
 const recommendationController = require("../controllers/recommendationController");
 const { requireAuth } = require("../middlewares/auth");
+const { requireRecommendationEnabled } = require("../middlewares/recommendationSecurity");
 const validate = require("../middlewares/validate");
 const {
   feedQuerySchema,
@@ -13,13 +14,13 @@ const {
 
 const router = express.Router();
 
-router.get("/feed/summary", requireAuth, recommendationController.getFeedSummary);
-router.get("/feed/me", requireAuth, validate(feedQuerySchema), recommendationController.getMyFeed);
-router.get("/reels/me", requireAuth, validate(feedQuerySchema), recommendationController.getMyReels);
+router.get("/feed/summary", requireAuth, requireRecommendationEnabled, recommendationController.getFeedSummary);
+router.get("/feed/me", requireAuth, requireRecommendationEnabled, validate(feedQuerySchema), recommendationController.getMyFeed);
+router.get("/reels/me", requireAuth, requireRecommendationEnabled, validate(feedQuerySchema), recommendationController.getMyReels);
 
-router.post("/interactions/impression", requireAuth, validate(impressionSchema), recommendationController.trackImpression);
-router.post("/interactions/watch-progress", requireAuth, validate(watchProgressSchema), recommendationController.trackWatchProgress);
-router.post("/interactions/not-interested", requireAuth, validate(notInterestedSchema), recommendationController.markNotInterested);
-router.post("/interactions/onboarding-topics", requireAuth, validate(onboardingTopicsSchema), recommendationController.seedOnboardingTopics);
+router.post("/interactions/impression", requireAuth, requireRecommendationEnabled, validate(impressionSchema), recommendationController.trackImpression);
+router.post("/interactions/watch-progress", requireAuth, requireRecommendationEnabled, validate(watchProgressSchema), recommendationController.trackWatchProgress);
+router.post("/interactions/not-interested", requireAuth, requireRecommendationEnabled, validate(notInterestedSchema), recommendationController.markNotInterested);
+router.post("/interactions/onboarding-topics", requireAuth, requireRecommendationEnabled, validate(onboardingTopicsSchema), recommendationController.seedOnboardingTopics);
 
 module.exports = router;

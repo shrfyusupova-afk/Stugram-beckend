@@ -74,10 +74,22 @@ const buildMediaPayload = ({ uploaded, resolvedType, file }) => ({
 const buildConversationKey = (firstId, secondId) => [firstId.toString(), secondId.toString()].sort().join(":");
 
 const isDuplicateKeyError = (error) => error?.code === 11000;
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const findExistingClientMessage = (conversationId, senderId, clientId) => {
   if (!clientId) return null;
   return populateMessageRelations(Message.findOne({ conversation: conversationId, sender: senderId, clientId }));
+};
+
+const findExistingClientMessageWithRetry = async (conversationId, senderId, clientId, attempts = 2) => {
+  for (let i = 0; i < attempts; i += 1) {
+    const existing = await findExistingClientMessage(conversationId, senderId, clientId);
+    if (existing) return existing;
+    if (i < attempts - 1) {
+      await wait(30);
+    }
+  }
+  return null;
 };
 
 const attachSequence = (message, sequence) => ({
@@ -674,7 +686,7 @@ const sendMessage = async (currentUserId, conversationId, payload) => {
   }));
   incrementCounter("chat_send_attempt_total", { targetType: "direct", hasMedia: "false" });
   if (payload.clientId) {
-    const existing = await findExistingClientMessage(conversationId, currentUserId, payload.clientId);
+    const existing = await findExistingClientMessageWithRetry(conversationId, currentUserId, payload.clientId);
     if (existing) {
       logger.info("message_duplicate_clientid_resolved", buildChatTrace({
         targetId: conversation._id,
@@ -712,7 +724,7 @@ const sendMessage = async (currentUserId, conversationId, payload) => {
     // parallel retry created this clientId first, return that existing row with
     // the normal success shape instead of surfacing E11000 to the client.
     if (isDuplicateKeyError(error) && payload.clientId) {
-      const existing = await findExistingClientMessage(conversationId, currentUserId, payload.clientId);
+      const existing = await findExistingClientMessageWithRetry(conversationId, currentUserId, payload.clientId);
       if (existing) {
         logger.info("message_duplicate_clientid_resolved", buildChatTrace({
           targetId: conversation._id,
@@ -729,6 +741,7 @@ const sendMessage = async (currentUserId, conversationId, payload) => {
           participantIds: conversation.participants.map((participant) => participant._id.toString()),
         };
       }
+      throw new ApiError(409, "Duplicate message request is still resolving. Please retry.");
     }
     logger.error("message_create_failed", {
       ...buildChatTrace({
@@ -806,7 +819,7 @@ const sendMediaMessage = async (currentUserId, conversationId, payload, file) =>
   }));
   incrementCounter("chat_send_attempt_total", { targetType: "direct", hasMedia: "true" });
   if (payload.clientId) {
-    const existing = await findExistingClientMessage(conversationId, currentUserId, payload.clientId);
+    const existing = await findExistingClientMessageWithRetry(conversationId, currentUserId, payload.clientId);
     if (existing) {
       logger.info("message_duplicate_clientid_resolved", buildChatTrace({
         targetId: conversation._id,
@@ -896,7 +909,7 @@ const sendMediaMessage = async (currentUserId, conversationId, payload, file) =>
     };
   } catch (error) {
     if (isDuplicateKeyError(error) && payload.clientId) {
-      const existing = await findExistingClientMessage(conversationId, currentUserId, payload.clientId);
+      const existing = await findExistingClientMessageWithRetry(conversationId, currentUserId, payload.clientId);
       if (existing) {
         // A concurrent send won the unique-index race after this request had
         // uploaded media. Remove this request's unused upload and return the
@@ -920,6 +933,7 @@ const sendMediaMessage = async (currentUserId, conversationId, payload, file) =>
           participantIds: conversation.participants.map((participant) => participant._id.toString()),
         };
       }
+      throw new ApiError(409, "Duplicate media message request is still resolving. Please retry.");
     }
     if (message?._id) {
       await Message.findByIdAndDelete(message._id).catch(() => null);
@@ -1386,3 +1400,4 @@ module.exports = {
   getConversationUnreadCounts,
   formatConversation,
 };
+

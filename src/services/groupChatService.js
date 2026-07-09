@@ -17,6 +17,7 @@ const SUPPORTED_SHARE_KINDS = new Set(["POST", "REEL", "MUSIC", "FILE", "LOCATIO
 const escapeRegex = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const isDuplicateKeyError = (error) => error?.code === 11000;
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const attachSequence = (message, sequence) => ({
   ...message,
@@ -623,8 +624,18 @@ const createMessageRecord = async ({ currentUserId, group, payload, file = null 
       GroupMessage.findOne({ groupConversation: group._id, sender: currentUserId, clientId: payload.clientId })
     );
   };
+  const findExistingClientMessageWithRetry = async (attempts = 2) => {
+    for (let i = 0; i < attempts; i += 1) {
+      const existing = await findExistingClientMessage();
+      if (existing) return existing;
+      if (i < attempts - 1) {
+        await wait(30);
+      }
+    }
+    return null;
+  };
   if (payload.clientId) {
-    const existing = await findExistingClientMessage();
+    const existing = await findExistingClientMessageWithRetry();
     if (existing) {
       logger.info("message_duplicate_clientid_resolved", buildGroupTrace({
         targetId: group._id,
@@ -687,7 +698,7 @@ const createMessageRecord = async ({ currentUserId, group, payload, file = null 
     });
   } catch (error) {
     if (isDuplicateKeyError(error) && payload.clientId) {
-      const existing = await findExistingClientMessage();
+      const existing = await findExistingClientMessageWithRetry();
       if (existing) {
         // The unique idempotency index is the final guard against concurrent
         // retries. Return the already-created row with the normal success shape
@@ -710,6 +721,7 @@ const createMessageRecord = async ({ currentUserId, group, payload, file = null 
           participantIds: memberIds,
         };
       }
+      throw new ApiError(409, "Duplicate group message request is still resolving. Please retry.");
     }
     if (message?._id) {
       await GroupMessage.findByIdAndDelete(message._id).catch(() => null);

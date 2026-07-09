@@ -1,16 +1,5 @@
-const crypto = require("crypto");
-
 const logger = require("../utils/logger");
 const { env } = require("../config/env");
-
-const assignRequestContext = (req, res, next) => {
-  const incomingRequestId = typeof req.headers["x-request-id"] === "string" ? req.headers["x-request-id"].trim() : "";
-  const requestId = incomingRequestId && incomingRequestId.length <= 128 ? incomingRequestId : crypto.randomUUID();
-  req.requestId = requestId;
-  req.requestStartedAt = process.hrtime.bigint();
-  res.setHeader("X-Request-Id", requestId);
-  next();
-};
 
 const logRequestCompletion = (req, res, next) => {
   res.on("finish", () => {
@@ -24,6 +13,8 @@ const logRequestCompletion = (req, res, next) => {
       statusCode: res.statusCode,
       durationMs: Number(durationMs.toFixed(2)),
       userId: req.user?.id || null,
+      errorCode: res.locals.errorCode || null,
+      result: res.statusCode >= 400 ? "error" : "success",
     };
 
     if (durationMs >= env.requestSlowMs) {
@@ -38,6 +29,5 @@ const logRequestCompletion = (req, res, next) => {
 };
 
 module.exports = {
-  assignRequestContext,
   logRequestCompletion,
 };

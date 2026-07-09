@@ -2,6 +2,8 @@ const ApiError = require("../utils/ApiError");
 const ChatEvent = require("../models/ChatEvent");
 const Conversation = require("../models/Conversation");
 const GroupConversation = require("../models/GroupConversation");
+const Message = require("../models/Message");
+const GroupMessage = require("../models/GroupMessage");
 const logger = require("../utils/logger");
 const { incrementCounter } = require("./chatMetricsService");
 
@@ -41,17 +43,36 @@ const allocateSequence = async (targetType, targetId) => {
   return target.latestSequence;
 };
 
-const serializeEvent = (event) => ({
-  sequence: event.sequence,
-  type: event.type,
-  targetType: event.targetType,
-  targetId: event.targetId?.toString(),
-  messageId: event.messageId ? event.messageId.toString() : null,
-  clientId: event.clientId || null,
-  actorId: event.actorId ? event.actorId.toString() : null,
-  createdAt: event.createdAt?.toISOString?.() || event.createdAt,
-  payload: event.payload || {},
-});
+const serializeEvent = (event) => {
+  const targetId = event.targetId?.toString?.() || null;
+  return {
+    eventId: event._id?.toString?.() || null,
+    eventType: event.type,
+    serverSequence: event.sequence,
+    sequence: event.sequence,
+    type: event.type,
+    targetType: event.targetType,
+    targetId,
+    conversationId: event.targetType === "direct" ? targetId : null,
+    groupId: event.targetType === "group" ? targetId : null,
+    messageId: event.messageId ? event.messageId.toString() : null,
+    clientId: event.clientId || null,
+    actorId: event.actorId ? event.actorId.toString() : null,
+    createdAt: event.createdAt?.toISOString?.() || event.createdAt,
+    payload: event.payload || {},
+  };
+};
+
+const syncMessageSequence = async ({ targetType, messageId, sequence }) => {
+  if (!messageId || !sequence) return;
+  if (targetType === "direct") {
+    await Message.findByIdAndUpdate(messageId, { $max: { serverSequence: sequence } }).catch(() => null);
+    return;
+  }
+  if (targetType === "group") {
+    await GroupMessage.findByIdAndUpdate(messageId, { $max: { serverSequence: sequence } }).catch(() => null);
+  }
+};
 
 const recordChatEvent = async ({
   targetType,
@@ -84,6 +105,7 @@ const recordChatEvent = async ({
     clientId: clientId || null,
     actorId: actorId?.toString?.() || actorId || null,
   });
+  await syncMessageSequence({ targetType, messageId, sequence });
 
   return serializeEvent(event);
 };

@@ -64,7 +64,10 @@ const createDistributedRateLimiter = ({ keyPrefix, windowMs, limit, message }) =
   res.setHeader("X-RateLimit-Remaining", String(result.remaining));
 
   if (!result.allowed) {
-    res.setHeader("Retry-After", String(Math.ceil(result.retryAfterMs / 1000)));
+    const retryAfterSeconds = Math.max(1, Math.ceil(result.retryAfterMs / 1000));
+    const resetAtEpochSeconds = Math.ceil((Date.now() + result.retryAfterMs) / 1000);
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    res.setHeader("X-RateLimit-Reset", String(resetAtEpochSeconds));
     const route = req.originalUrl || req.path || "unknown";
     logger.warn("rate_limit_hit", {
       requestId: req.requestId || null,
@@ -72,7 +75,9 @@ const createDistributedRateLimiter = ({ keyPrefix, windowMs, limit, message }) =
       authenticated: isAuthenticatedRequest(req),
       bucketKey: `${keyPrefix}:${actorKey}`,
       httpStatus: 429,
+      retryAfterSeconds,
       retryAfterMs: result.retryAfterMs,
+      resetAtEpochSeconds,
       remaining: result.remaining,
       limit: effectiveLimit,
     });
