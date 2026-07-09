@@ -14,6 +14,7 @@ const LINK_CODE_EXPIRES_MINUTES = 10;
 const REGISTER_OTP_EXPIRES_MINUTES = 15;
 const TELEGRAM_API_BASE = "https://api.telegram.org";
 
+const MENU_LABEL_REGISTER = "📝 Ro'yxatdan o'tish";
 const MENU_LABEL_SUPPORT = "📩 Adminga murojaat qilish";
 const MENU_LABEL_CHANNELS = "📢 Bizning kanalimiz";
 
@@ -149,15 +150,38 @@ const MAIN_MENU_KEYBOARD = {
   },
 };
 
+// Shown on a bare "/start" (no code): the bot can be discovered and used on
+// its own, without the app having opened it first.
+const DEFAULT_MENU_KEYBOARD = {
+  reply_markup: {
+    keyboard: [
+      [{ text: MENU_LABEL_REGISTER }],
+      [{ text: MENU_LABEL_CHANNELS }, { text: MENU_LABEL_SUPPORT }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  },
+};
+
 const handleStartCommand = async (message) => {
   const chat = message.chat;
   const code = message.text.replace("/start", "").trim();
 
   if (!code) {
+    const existingUser = await User.findOne({ identity: identityForChat(chat.id) }).select("username");
+    if (existingUser) {
+      await replySafely(
+        chat.id,
+        `Assalomu alaykum! 👋\n\nSiz allaqachon ro'yxatdan o'tgansiz (@${existingUser.username}). Ilovadagi "Kirish" bo'limidan username va parolingiz bilan kiring. ✅`,
+        MAIN_MENU_KEYBOARD
+      );
+      return;
+    }
+
     await replySafely(
       chat.id,
-      "Assalomu alaykum! 👋\n\nRo'yxatdan o'tish Stugram ilovasi orqali boshlanadi. Ilovadagi \"Telegram orqali ro'yxatdan o'tish\" tugmasini bosing — bot sizni shu yerga o'zi olib keladi.",
-      MAIN_MENU_KEYBOARD
+      "Assalomu alaykum! 👋\n\nStugram — talabalar uchun zamonaviy ijtimoiy tarmoq. Ro'yxatdan o'tishni boshlash uchun pastdagi tugmani bosing.",
+      DEFAULT_MENU_KEYBOARD
     );
     return;
   }
@@ -192,6 +216,43 @@ const handleStartCommand = async (message) => {
   await replySafely(
     chat.id,
     "Stugram'ga xush kelibsiz! 👋\n\nRo'yxatdan o'tishni davom ettirish uchun pastdagi tugma orqali telefon raqamingizni yuboring.",
+    CONTACT_REQUEST_KEYBOARD
+  );
+};
+
+// Fired when the user presses "Ro'yxatdan o'tish" inside the bot directly
+// (as opposed to arriving via the app's "/start <code>" deep link) — mints
+// its own link code with chatId already attached.
+const handleRegisterButtonPress = async (chat) => {
+  const existingUser = await User.findOne({ identity: identityForChat(chat.id) }).select("username");
+  if (existingUser) {
+    await replySafely(
+      chat.id,
+      `Siz allaqachon ro'yxatdan o'tgansiz (@${existingUser.username}). Ilovadagi "Kirish" bo'limidan kiring. ✅`,
+      MAIN_MENU_KEYBOARD
+    );
+    return;
+  }
+
+  let record = await TelegramLinkCode.findOne({
+    chatId: String(chat.id),
+    linked: false,
+    expiresAt: { $gt: new Date() },
+  }).sort({ createdAt: -1 });
+
+  if (!record) {
+    record = await TelegramLinkCode.create({
+      code: crypto.randomBytes(6).toString("hex"),
+      chatId: String(chat.id),
+      telegramUsername: chat.username || null,
+      firstName: chat.first_name || null,
+      expiresAt: new Date(Date.now() + LINK_CODE_EXPIRES_MINUTES * 60 * 1000),
+    });
+  }
+
+  await replySafely(
+    chat.id,
+    "Ro'yxatdan o'tishni davom ettirish uchun pastdagi tugma orqali telefon raqamingizni yuboring.",
     CONTACT_REQUEST_KEYBOARD
   );
 };
@@ -259,9 +320,17 @@ const handleContactMessage = async (message) => {
 
   await replySafely(
     chat.id,
-    "Raqamingiz tasdiqlandi! ✅\n\nEndi Stugram ilovasiga qayting — ro'yxatdan o'tish avtomatik davom etadi.",
+    "Raqamingiz tasdiqlandi! ✅\n\nAgar Stugram ilovasi ochiq bo'lsa, ro'yxatdan o'tish o'zi davom etadi. Aks holda pastdagi tugmani bosing.",
     MAIN_MENU_KEYBOARD
   );
+
+  // Inline keyboard "url" buttons only accept http(s) (custom app schemes are
+  // rejected by Telegram), so route through an https bridge page that
+  // redirects into the app via stugram://telegram-register.
+  const bridgeLink = `${env.publicBaseUrl}/app/telegram-register?code=${record.code}`;
+  await replySafely(chat.id, "👇 Ro'yxatdan o'tishni yakunlash uchun bosing:", {
+    reply_markup: { inline_keyboard: [[{ text: "📲 Ilovani ochish", url: bridgeLink }]] },
+  });
 };
 
 const DEFAULT_CHANNELS_TEXT =
@@ -329,6 +398,11 @@ const handleTelegramUpdate = async (update) => {
 
   if (text && text.startsWith("/start")) {
     await handleStartCommand(message);
+    return;
+  }
+
+  if (text === MENU_LABEL_REGISTER) {
+    await handleRegisterButtonPress(chat);
     return;
   }
 

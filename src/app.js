@@ -202,6 +202,29 @@ app.get("/livez", (_req, res) => {
   });
 });
 
+// Telegram's inline keyboard buttons only accept http(s) URLs, so the bot
+// can't link straight to a custom app scheme (stugram://...). This bridge
+// page is https, gets accepted by Telegram, and immediately redirects into
+// the app via the custom scheme once opened in a browser/in-app browser.
+app.get("/app/telegram-register", (req, res) => {
+  const code = String(req.query.code || "").replace(/[^a-zA-Z0-9]/g, "");
+  const deepLink = `stugram://telegram-register?code=${code}`;
+
+  res.status(200).type("html").send(`<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Stugram</title>
+<script>window.location.href = ${JSON.stringify(deepLink)};</script>
+</head>
+<body style="font-family:sans-serif;text-align:center;padding-top:60px;">
+  <p>Stugram ilovasiga o'tilmoqda...</p>
+  <p><a href="${deepLink}">Agar avtomatik ochilmasa, shu yerni bosing</a></p>
+</body>
+</html>`);
+});
+
 app.get("/readyz", (req, res) => {
   Promise.all([Promise.resolve(getDatabaseStatus()), Promise.resolve(getRedisStatus()), getQueueHealthSnapshot()]).then(
     ([database, redis, queueHealth]) => {
