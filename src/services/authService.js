@@ -408,10 +408,18 @@ const register = async (payload, meta = {}) => {
 };
 
 const login = async ({ identityOrUsername, password }, meta = {}) => {
+  // A leading "@" is how usernames are shown everywhere in the app, so users
+  // naturally type "@username" here too -- that must resolve as a username,
+  // not misfire the identity lookup just because it contains "@". Only a
+  // real email/phone shape (or our internal "tg:<chatId>") is an identity.
+  const trimmed = identityOrUsername.trim();
+  const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+  const isPhone = /^\+998\d{9}$/.test(trimmed);
+  const isTelegramIdentity = /^tg:\d+$/.test(trimmed);
   const query =
-    identityOrUsername.includes("@") || identityOrUsername.startsWith("+")
-      ? { identity: identityOrUsername.toLowerCase() }
-      : { username: identityOrUsername.toLowerCase() };
+    isEmail || isPhone || isTelegramIdentity
+      ? { identity: trimmed.toLowerCase() }
+      : { username: trimmed.replace(/^@/, "").toLowerCase() };
 
   const user = await User.findOne(query).select(
     "identity fullName username bio avatar banner birthday location school region district grade group type role isPrivateAccount followersCount followingCount postsCount googleId lastLoginAt createdAt accountId passwordHash tokenInvalidBefore isSuspended suspendedUntil suspensionReason"
@@ -483,6 +491,36 @@ const login = async ({ identityOrUsername, password }, meta = {}) => {
     ipAddress: meta.ipAddress || null,
     userAgent: meta.userAgent || null,
     details: { suspicious: isSuspicious },
+  });
+
+  return { user: sanitizeUser(user), ...tokens };
+};
+
+// Used by the Telegram bot flow: possession of the linked Telegram chat (the
+// user pressing /start or sharing contact from their own account) is treated
+// as sufficient proof of identity for an *already-registered* account, the
+// same trust model as a magic-link/OAuth login -- no password re-entry.
+const loginViaTelegramChat = async (chatId, meta = {}) => {
+  const identity = `tg:${chatId}`;
+  const user = await User.findOne({ identity }).select(
+    "identity fullName username bio avatar banner birthday location school region district grade group type role isPrivateAccount followersCount followingCount postsCount googleId lastLoginAt createdAt accountId passwordHash tokenInvalidBefore isSuspended suspendedUntil suspensionReason"
+  );
+  if (!user) return null;
+
+  user.lastLoginAt = new Date();
+  await user.save();
+
+  const tokens = await createSessionTokens(user, meta);
+  await createAuditLog({
+    actor: user.id,
+    action: "auth.login",
+    category: "auth",
+    status: "success",
+    targetUser: user.id,
+    sessionId: tokens.sessionId,
+    ipAddress: meta.ipAddress || null,
+    userAgent: meta.userAgent || null,
+    details: { via: "telegram" },
   });
 
   return { user: sanitizeUser(user), ...tokens };
@@ -1129,6 +1167,7 @@ module.exports = {
   verifyOtp,
   register,
   login,
+  loginViaTelegramChat,
   forgotPassword,
   resetPassword,
   changePassword,

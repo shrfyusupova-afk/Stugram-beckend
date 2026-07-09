@@ -10,6 +10,13 @@ const { hashOtp } = require("../utils/token");
 const ApiError = require("../utils/ApiError");
 const logger = require("../utils/logger");
 
+// authService requires otpDeliveryService, which requires this module --
+// requiring authService at the top here would complete a circular chain and
+// hand back an empty (not-yet-populated) exports object. Deferred require
+// instead: by the time these functions actually run, module loading has
+// long finished and the cached, fully-populated module is returned.
+const getAuthService = () => require("./authService");
+
 const LINK_CODE_EXPIRES_MINUTES = 10;
 const REGISTER_OTP_EXPIRES_MINUTES = 15;
 const TELEGRAM_API_BASE = "https://api.telegram.org";
@@ -115,6 +122,17 @@ const getLinkStatus = async (code) => {
     ? await User.findOne({ identity }).select("username")
     : null;
 
+  // Session tokens (issued for the already-registered/login case) are
+  // one-time-read: hand them back now, then clear them so they don't sit in
+  // the database any longer than necessary.
+  const accessToken = record.accessToken;
+  const refreshToken = record.refreshToken;
+  if (accessToken || refreshToken) {
+    record.accessToken = null;
+    record.refreshToken = null;
+    await record.save();
+  }
+
   return {
     linked: true,
     alreadyRegistered: Boolean(existingUser),
@@ -126,6 +144,8 @@ const getLinkStatus = async (code) => {
     // The register OTP is only meaningful for fresh registrations; the code
     // param is the shared secret that authorizes reading it.
     otp: existingUser ? null : record.otp,
+    accessToken,
+    refreshToken,
   };
 };
 
@@ -201,12 +221,17 @@ const handleStartCommand = async (message) => {
 
   const existingUser = await User.findOne({ identity: identityForChat(chat.id) }).select("username");
   if (existingUser) {
-    // Let the app stop waiting and show the "already registered" path.
+    // Possession of this Telegram chat is enough to log the already
+    // registered owner straight in -- the app picks the tokens up via
+    // link-status, no separate password/OTP entry needed.
+    const session = await getAuthService().loginViaTelegramChat(chat.id);
     record.linked = true;
+    record.accessToken = session?.accessToken || null;
+    record.refreshToken = session?.refreshToken || null;
     await record.save();
     await replySafely(
       chat.id,
-      `Siz allaqachon ro'yxatdan o'tgansiz (@${existingUser.username}). ✅\nIlovadagi \"Kirish\" bo'limidan username va parolingiz bilan kiring. Parolni unutgan bo'lsangiz, \"Parolni unutdingizmi?\" tugmasini bosing.`,
+      `Siz allaqachon ro'yxatdan o'tgansiz (@${existingUser.username}). ✅\nIlovaga qaytib turing — sizni avtomatik kiritamiz.`,
       MAIN_MENU_KEYBOARD
     );
     return;
@@ -226,6 +251,20 @@ const handleStartCommand = async (message) => {
 const handleRegisterButtonPress = async (chat) => {
   const existingUser = await User.findOne({ identity: identityForChat(chat.id) }).select("username");
   if (existingUser) {
+    // If the app already has a pending code polling for this chat (e.g. a
+    // login attempt), let it pick up a real session too.
+    const pending = await TelegramLinkCode.findOne({
+      chatId: String(chat.id),
+      linked: false,
+      expiresAt: { $gt: new Date() },
+    }).sort({ createdAt: -1 });
+    if (pending) {
+      const session = await getAuthService().loginViaTelegramChat(chat.id);
+      pending.linked = true;
+      pending.accessToken = session?.accessToken || null;
+      pending.refreshToken = session?.refreshToken || null;
+      await pending.save();
+    }
     await replySafely(
       chat.id,
       `Siz allaqachon ro'yxatdan o'tgansiz (@${existingUser.username}). Ilovadagi "Kirish" bo'limidan kiring. ✅`,
@@ -286,11 +325,14 @@ const handleContactMessage = async (message) => {
 
   const existingUser = await User.findOne({ identity }).select("username");
   if (existingUser) {
+    const session = await getAuthService().loginViaTelegramChat(chat.id);
     record.linked = true;
+    record.accessToken = session?.accessToken || null;
+    record.refreshToken = session?.refreshToken || null;
     await record.save();
     await replySafely(
       chat.id,
-      `Siz allaqachon ro'yxatdan o'tgansiz (@${existingUser.username}). Ilovadagi \"Kirish\" bo'limidan kiring. ✅`,
+      `Siz allaqachon ro'yxatdan o'tgansiz (@${existingUser.username}). ✅\nIlovaga qaytib turing — sizni avtomatik kiritamiz.`,
       MAIN_MENU_KEYBOARD
     );
     return;

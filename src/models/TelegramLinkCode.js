@@ -32,6 +32,17 @@ const telegramLinkCodeSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    // Session tokens issued when this code resolves to an *already
+    // registered* Telegram account (login, not fresh registration). Cleared
+    // as soon as link-status hands them back once, so they don't linger.
+    accessToken: {
+      type: String,
+      default: null,
+    },
+    refreshToken: {
+      type: String,
+      default: null,
+    },
     linked: {
       type: Boolean,
       default: false,

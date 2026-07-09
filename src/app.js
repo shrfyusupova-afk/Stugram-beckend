@@ -204,8 +204,12 @@ app.get("/livez", (_req, res) => {
 
 // Telegram's inline keyboard buttons only accept http(s) URLs, so the bot
 // can't link straight to a custom app scheme (stugram://...). This bridge
-// page is https, gets accepted by Telegram, and immediately redirects into
-// the app via the custom scheme once opened in a browser/in-app browser.
+// page is https, gets accepted by Telegram, and hands off into the app via
+// the custom scheme. Mobile browsers (Telegram's in-app browser included)
+// commonly block a JS-triggered auto-redirect to a non-http(s) scheme as a
+// security policy, so the real, reliable path is a big tappable button --
+// a genuine user tap is what actually gets honored. The JS attempt still
+// runs first since it costs nothing when it does work.
 app.get("/app/telegram-register", (req, res) => {
   const code = String(req.query.code || "").replace(/[^a-zA-Z0-9]/g, "");
   const deepLink = `stugram://telegram-register?code=${code}`;
@@ -216,11 +220,22 @@ app.get("/app/telegram-register", (req, res) => {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Stugram</title>
-<script>window.location.href = ${JSON.stringify(deepLink)};</script>
+<style>
+  body { font-family: sans-serif; text-align: center; padding: 60px 24px; background: #0F0F0F; color: #fff; }
+  a.btn { display: inline-block; margin-top: 24px; padding: 16px 32px; background: #00A3FF; color: #fff;
+    text-decoration: none; border-radius: 28px; font-weight: bold; font-size: 16px; }
+  p.hint { color: #aaa; font-size: 14px; margin-top: 16px; }
+</style>
 </head>
-<body style="font-family:sans-serif;text-align:center;padding-top:60px;">
-  <p>Stugram ilovasiga o'tilmoqda...</p>
-  <p><a href="${deepLink}">Agar avtomatik ochilmasa, shu yerni bosing</a></p>
+<body>
+  <p>Stugram ilovasiga o'tish uchun pastdagi tugmani bosing 👇</p>
+  <a class="btn" href="${deepLink}" id="openApp">📲 Ilovani ochish</a>
+  <p class="hint">Agar ilova ochilmasa, Stugram o'rnatilganini tekshiring.</p>
+  <script>
+    // Best-effort auto attempt; falls back to the button tap above if the
+    // browser blocks a script-driven navigation to a custom scheme.
+    try { window.location.replace(${JSON.stringify(deepLink)}); } catch (e) {}
+  </script>
 </body>
 </html>`);
 });
