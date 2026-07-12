@@ -145,4 +145,40 @@ describe("rate limiter middleware", () => {
     );
     expect(next).not.toHaveBeenCalled();
   });
+
+  it("fails open and still calls next() when consumeRateLimit rejects (e.g. a Redis blip with REDIS_REQUIRED=true)", async () => {
+    consumeRateLimit.mockRejectedValue(new Error("Redis connection lost"));
+
+    const limiter = createDistributedRateLimiter({
+      keyPrefix: "api",
+      windowMs: 15 * 60 * 1000,
+      limit: 100,
+      message: "Too many requests. Please try again later.",
+    });
+    const req = {
+      requestId: "req_test_123",
+      headers: {},
+      ip: "198.51.100.20",
+    };
+    const res = buildResponse();
+    const next = jest.fn();
+
+    // The bug this guards against: without a try/catch around the await,
+    // this rejection would previously propagate out of the async middleware
+    // uncaught -- Express never sees it, next() is never called, and the
+    // request hangs forever with no response.
+    await expect(limiter(req, res, next)).resolves.toBeUndefined();
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledWith();
+    expect(res.status).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "rate_limiter_failed_open",
+      expect.objectContaining({
+        requestId: "req_test_123",
+        limiter: "api",
+        message: "Redis connection lost",
+      })
+    );
+  });
 });

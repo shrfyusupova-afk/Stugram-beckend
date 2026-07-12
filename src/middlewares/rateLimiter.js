@@ -52,54 +52,71 @@ const resolveLimit = (limitConfig, req) => {
 const createDistributedRateLimiter = ({ keyPrefix, windowMs, limit, message }) => async (req, res, next) => {
   if (shouldBypassRateLimit(req)) return next();
 
-  const actorKey = keyGenerator(req);
-  const effectiveLimit = resolveLimit(limit, req);
-  const result = await consumeRateLimit({
-    key: `${keyPrefix}:${actorKey}`,
-    limit: effectiveLimit,
-    windowMs,
-  });
-
-  res.setHeader("X-RateLimit-Limit", String(effectiveLimit));
-  res.setHeader("X-RateLimit-Remaining", String(result.remaining));
-
-  if (!result.allowed) {
-    const retryAfterSeconds = Math.max(1, Math.ceil(result.retryAfterMs / 1000));
-    const resetAtEpochSeconds = Math.ceil((Date.now() + result.retryAfterMs) / 1000);
-    res.setHeader("Retry-After", String(retryAfterSeconds));
-    res.setHeader("X-RateLimit-Reset", String(resetAtEpochSeconds));
-    const route = req.originalUrl || req.path || "unknown";
-    logger.warn("rate_limit_hit", {
-      requestId: req.requestId || null,
-      route,
-      authenticated: isAuthenticatedRequest(req),
-      bucketKey: `${keyPrefix}:${actorKey}`,
-      httpStatus: 429,
-      retryAfterSeconds,
-      retryAfterMs: result.retryAfterMs,
-      resetAtEpochSeconds,
-      remaining: result.remaining,
+  try {
+    const actorKey = keyGenerator(req);
+    const effectiveLimit = resolveLimit(limit, req);
+    const result = await consumeRateLimit({
+      key: `${keyPrefix}:${actorKey}`,
       limit: effectiveLimit,
+      windowMs,
     });
-    incrementCounter("chat_rate_limit_hit_total", {
-      route,
-      authenticated: isAuthenticatedRequest(req) ? "true" : "false",
-      limiter: keyPrefix,
-    });
-    incrementCounter("chat_429_total", {
-      route,
-      authenticated: isAuthenticatedRequest(req) ? "true" : "false",
-      limiter: keyPrefix,
-    });
-    return res.status(429).json({
-      success: false,
-      message,
-      data: null,
-      meta: null,
-    });
-  }
 
-  next();
+    res.setHeader("X-RateLimit-Limit", String(effectiveLimit));
+    res.setHeader("X-RateLimit-Remaining", String(result.remaining));
+
+    if (!result.allowed) {
+      const retryAfterSeconds = Math.max(1, Math.ceil(result.retryAfterMs / 1000));
+      const resetAtEpochSeconds = Math.ceil((Date.now() + result.retryAfterMs) / 1000);
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      res.setHeader("X-RateLimit-Reset", String(resetAtEpochSeconds));
+      const route = req.originalUrl || req.path || "unknown";
+      logger.warn("rate_limit_hit", {
+        requestId: req.requestId || null,
+        route,
+        authenticated: isAuthenticatedRequest(req),
+        bucketKey: `${keyPrefix}:${actorKey}`,
+        httpStatus: 429,
+        retryAfterSeconds,
+        retryAfterMs: result.retryAfterMs,
+        resetAtEpochSeconds,
+        remaining: result.remaining,
+        limit: effectiveLimit,
+      });
+      incrementCounter("chat_rate_limit_hit_total", {
+        route,
+        authenticated: isAuthenticatedRequest(req) ? "true" : "false",
+        limiter: keyPrefix,
+      });
+      incrementCounter("chat_429_total", {
+        route,
+        authenticated: isAuthenticatedRequest(req) ? "true" : "false",
+        limiter: keyPrefix,
+      });
+      return res.status(429).json({
+        success: false,
+        message,
+        data: null,
+        meta: null,
+      });
+    }
+
+    return next();
+  } catch (error) {
+    // Rate limiting is an abuse-prevention safeguard, not an authentication
+    // or authorization boundary. If the limiter itself can't be evaluated
+    // (e.g. a Redis blip with REDIS_REQUIRED=true, so consumeRateLimit
+    // rethrows instead of falling back), fail OPEN -- let the request
+    // through and log it -- rather than hanging the request (no next()
+    // ever called) or 500ing every single request until Redis recovers.
+    logger.warn("rate_limiter_failed_open", {
+      requestId: req.requestId || null,
+      route: req.originalUrl || req.path || "unknown",
+      limiter: keyPrefix,
+      errorName: error?.name,
+      message: error?.message,
+    });
+    return next();
+  }
 };
 
 const apiLimiter = createDistributedRateLimiter({
